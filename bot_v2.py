@@ -1196,12 +1196,31 @@ async def error_handler(update, context):
     print("Unhandled error:", repr(context.error))
 
 
+async def telegram_startup(app_bot):
+    """Render-safe Telegram startup: clear any old webhook and verify the token."""
+    print("[GuessArena] Telegram startup: checking bot connection...", flush=True)
+    try:
+        await app_bot.bot.delete_webhook(drop_pending_updates=True)
+        me = await app_bot.bot.get_me()
+        print(f"[GuessArena] Telegram connected as @{me.username or me.first_name} (id={me.id})", flush=True)
+    except Exception as exc:
+        print(f"[GuessArena] TELEGRAM STARTUP ERROR: {exc!r}", flush=True)
+        raise
+
+
 def main():
     init_db()
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is missing.")
+    print("[GuessArena] BOT_TOKEN found. Building Telegram application...", flush=True)
     request = HTTPXRequest(connect_timeout=20, read_timeout=30, write_timeout=30, pool_timeout=30)
-    app_bot = Application.builder().token(TOKEN).request(request).build()
+    app_bot = (
+        Application.builder()
+        .token(TOKEN)
+        .request(request)
+        .post_init(telegram_startup)
+        .build()
+    )
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("help", help_cmd))
     app_bot.add_handler(CommandHandler("play", play))
@@ -1213,8 +1232,10 @@ def main():
     app_bot.add_handler(CallbackQueryHandler(button))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, answer))
     app_bot.add_error_handler(error_handler)
-    print("GuessArena V3 is LIVE — continuous arena enabled")
-    app_bot.run_polling(drop_pending_updates=True)
+    print("[GuessArena] All handlers loaded.", flush=True)
+    print("GuessArena V3 is LIVE — continuous arena enabled", flush=True)
+    print("[GuessArena] Starting polling...", flush=True)
+    app_bot.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
