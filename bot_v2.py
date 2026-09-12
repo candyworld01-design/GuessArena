@@ -514,7 +514,7 @@ async def start_game(update, context, mode="Random", difficulty="Any"):
     text = (
         f"🎮 <b>{q['mode']} MODE</b>\n"
         f"🔥 Difficulty: <b>{q['difficulty']}</b>\n\n"
-        f"🧩 <b>{q['question']}</b>\n\n"
+        f"🧩 <b>{q['q']}</b>\n\n"
         f"✍️ Answer bhejo!"
     )
 
