@@ -184,6 +184,46 @@ QUESTIONS = [
         "answers": ["echo", "an echo"],
         "xp": 50,
     },
+        {
+        "mode": "Panic",
+        "difficulty": "Easy",
+        "q": "🍎 Apple ka common color?",
+        "hint": "🔴 Stop signal",
+        "answers": ["red"],
+        "xp": 10,
+    },
+    {
+        "mode": "Panic",
+        "difficulty": "Easy",
+        "q": "🐱 Cat ki awaaz?",
+        "hint": "Meow!",
+        "answers": ["meow"],
+        "xp": 10,
+    },
+    {
+        "mode": "Panic",
+        "difficulty": "Medium",
+        "q": "🌍 Earth ka natural satellite?",
+        "hint": "🌙",
+        "answers": ["moon"],
+        "xp": 20,
+    },
+    {
+        "mode": "Panic",
+        "difficulty": "Medium",
+        "q": "🧠 5 + 7 = ?",
+        "hint": "12",
+        "answers": ["12"],
+        "xp": 20,
+    },
+    {
+        "mode": "Panic",
+        "difficulty": "Hard",
+        "q": "🔢 10 × 10 = ?",
+        "hint": "100",
+        "answers": ["100"],
+        "xp": 30,
+    },
 ]
 
 # =========================================================
