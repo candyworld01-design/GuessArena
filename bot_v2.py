@@ -605,25 +605,31 @@ async def answer(update, context):
         return
 
     game_data = active[chat_id]
-
     guess = normalize(update.message.text)
 
+    # WRONG ANSWER
     if guess not in game_data["answers"]:
         await update.message.reply_text(
             "❌ <b>Not quite!</b>\n"
-            "Keep thinking... 🧠😂",
+            "😂 Brain ko thoda aur load de!",
             parse_mode="HTML",
         )
         return
 
-    # Stop Panic timer
+    # STOP PANIC TIMER
     panic_task = game_data.get("panic_task")
 
     if panic_task:
         panic_task.cancel()
 
+    # Save current game's details before removing it
+    mode = game_data["mode"]
+    difficulty = game_data["difficulty"]
+    xp_reward = game_data["xp"]
+
     active.pop(chat_id, None)
 
+    # UPDATE PLAYER
     ensure_player(update.effective_user)
 
     conn = sqlite3.connect(DB)
@@ -639,7 +645,7 @@ async def answer(update, context):
     if row:
         xp, games, wins, streak = row
 
-        xp += game_data["xp"]
+        xp += xp_reward
         games += 1
         wins += 1
         streak += 1
@@ -662,14 +668,25 @@ async def answer(update, context):
     conn.commit()
     conn.close()
 
+    # CORRECT MESSAGE
     await update.message.reply_text(
         "🎉 <b>CORRECT!</b> 🔥🔥\n\n"
-        f"⚡ +{game_data['xp']} XP\n"
-        "🧠 Brain = OP 😂\n\n"
-        "🏆 Next round ke liye ready?",
+        f"⚡ +{xp_reward} XP\n"
+        f"🔥 Streak: <b>{streak}</b>\n\n"
+        "🚀 <b>NEXT QUESTION...</b>",
         parse_mode="HTML",
     )
 
+    # SMALL DELAY
+    await asyncio.sleep(0.7)
+
+    # AUTO NEXT QUESTION
+    await start_game(
+        update,
+        context,
+        mode=mode,
+        difficulty=difficulty,
+    )
 
 # =========================================================
 # PROFILE
