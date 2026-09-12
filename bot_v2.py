@@ -429,7 +429,24 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 # GAME
 # =========================================================
+async def panic_timeout(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.data
 
+    game_data = active.get(chat_id)
+
+    if not game_data:
+        return
+
+    if not game_data.get("panic", False):
+        return
+
+    active.pop(chat_id, None)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="⏰ <b>TIME UP!</b> 😂\n\n5 seconds khatam!\nPanic ne tumhe hara diya 💀",
+        parse_mode="HTML",
+    )
 async def start_game(update, context, mode="Random", difficulty="Any"):
     chat_id = update.effective_chat.id
 
