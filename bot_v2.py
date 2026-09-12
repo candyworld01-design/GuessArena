@@ -430,9 +430,51 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # GAME
 # =========================================================
 
-async def panic_countdown(chat_id, context):
+async def send_next_question(bot, chat_id, mode, difficulty):
+    q = choose_question(mode, difficulty)
+
+    active[chat_id] = {
+        "answers": [normalize(a) for a in q["answers"]],
+        "hint": q["hint"],
+        "xp": q["xp"],
+        "mode": q["mode"],
+        "difficulty": q["difficulty"],
+        "panic": mode == "Panic" and q["mode"] == "Panic",
+        "panic_task": None,
+    }
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💡 Hint", callback_data=f"hint:{chat_id}"),
+        ],
+        [
+            InlineKeyboardButton("🏠 Menu", callback_data="menu:home"),
+        ],
+    ])
+
+    text = (
+        f"🎮 <b>{q['mode']} MODE</b>\n"
+        f"🔥 Difficulty: <b>{q['difficulty']}</b>\n\n"
+        f"🧩 <b>{q['q']}</b>\n\n"
+        f"✍️ Answer bhejo!"
+    )
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+    if active[chat_id]["panic"]:
+        active[chat_id]["panic_task"] = asyncio.create_task(
+            panic_countdown(chat_id, bot, mode, difficulty)
+        )
+
+
+async def panic_countdown(chat_id, bot, mode, difficulty):
     try:
-        msg = await context.bot.send_message(
+        msg = await bot.send_message(
             chat_id=chat_id,
             text="⚡ <b>PANIC MODE!</b>\n\n⏳ <b>5</b>",
             parse_mode="HTML",
@@ -465,15 +507,21 @@ async def panic_countdown(chat_id, context):
                 await msg.edit_text(
                     "💀 <b>TIME UP!</b>\n\n"
                     "5 seconds khatam! 😂\n"
-                    "Panic ne tumhe hara diya!",
+                    "Panic ne tumhe hara diya!\n\n"
+                    "🚀 <b>NEXT QUESTION...</b>",
                     parse_mode="HTML",
                 )
             except Exception:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="💀 <b>TIME UP!</b>\n\n5 seconds khatam! 😂",
-                    parse_mode="HTML",
-                )
+                pass
+
+            await asyncio.sleep(0.7)
+
+            await send_next_question(
+                bot,
+                chat_id,
+                mode,
+                difficulty,
+            )
 
     except asyncio.CancelledError:
         return
@@ -490,44 +538,12 @@ async def start_game(update, context, mode="Random", difficulty="Any"):
         )
         return
 
-    q = choose_question(mode, difficulty)
-
-    active[chat_id] = {
-        "answers": [normalize(a) for a in q["answers"]],
-        "hint": q["hint"],
-        "xp": q["xp"],
-        "mode": q["mode"],
-        "difficulty": q["difficulty"],
-        "panic": mode == "Panic" and q["mode"] == "Panic",
-        "panic_task": None,
-    }
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💡 Hint", callback_data="hint"),
-        ],
-        [
-            InlineKeyboardButton("🏠 Menu", callback_data="menu"),
-        ],
-    ])
-
-    text = (
-        f"🎮 <b>{q['mode']} MODE</b>\n"
-        f"🔥 Difficulty: <b>{q['difficulty']}</b>\n\n"
-        f"🧩 <b>{q['q']}</b>\n\n"
-        f"✍️ Answer bhejo!"
+    await send_next_question(
+        context.bot,
+        chat_id,
+        mode,
+        difficulty,
     )
-
-    await update.effective_message.reply_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=keyboard,
-    )
-
-    if active[chat_id]["panic"]:
-        active[chat_id]["panic_task"] = asyncio.create_task(
-            panic_countdown(chat_id, context)
-        )
 
 
 async def game(update, context):
@@ -539,22 +555,11 @@ async def game(update, context):
     if data.startswith("mode:"):
         mode = data.split(":", 1)[1]
 
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🟢 Easy", callback_data=f"diff:{mode}:Easy"),
-                InlineKeyboardButton("🟡 Medium", callback_data=f"diff:{mode}:Medium"),
-            ],
-            [
-                InlineKeyboardButton("🔴 Hard", callback_data=f"diff:{mode}:Hard"),
-                InlineKeyboardButton("💀 Extreme", callback_data=f"diff:{mode}:Extreme"),
-            ],
-        ])
-
         await query.edit_message_text(
             f"🎮 <b>{mode} MODE</b>\n\n"
             "Difficulty choose karo 👇",
             parse_mode="HTML",
-            reply_markup=keyboard,
+            reply_markup=difficulty_menu(mode),
         )
         return
 
@@ -568,30 +573,6 @@ async def game(update, context):
             difficulty=difficulty,
         )
         return
-
-    if data == "hint":
-        chat_id = update.effective_chat.id
-
-        if chat_id not in active:
-            await query.message.reply_text(
-                "❌ Koi active game nahi hai!"
-            )
-            return
-
-        await query.message.reply_text(
-            f"💡 <b>Hint:</b> {active[chat_id]['hint']}",
-            parse_mode="HTML",
-        )
-        return
-
-    if data == "menu":
-        active.pop(update.effective_chat.id, None)
-
-        await query.edit_message_text(
-            "🏠 <b>GuessArena</b>\n\n"
-            "Game cancelled 😎",
-            parse_mode="HTML",
-        )
 
 
 # =========================================================
@@ -622,22 +603,25 @@ async def answer(update, context):
     if panic_task:
         panic_task.cancel()
 
-    # Save current game's details before removing it
     mode = game_data["mode"]
     difficulty = game_data["difficulty"]
     xp_reward = game_data["xp"]
 
     active.pop(chat_id, None)
 
-    # UPDATE PLAYER
-    ensure_player(update.effective_user)
-
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
+    # PLAYER
+    ensure_player(
+        chat_id,
+        update.effective_user,
+    )
 
     cur.execute(
-        "SELECT xp, games, wins, streak FROM players WHERE user_id=?",
-        (update.effective_user.id,),
+        """
+        SELECT xp, games, wins, streak
+        FROM players
+        WHERE chat_id=? AND user_id=?
+        """,
+        (chat_id, update.effective_user.id),
     )
 
     row = cur.fetchone()
@@ -653,22 +637,27 @@ async def answer(update, context):
         cur.execute(
             """
             UPDATE players
-            SET xp=?, games=?, wins=?, streak=?
-            WHERE user_id=?
+            SET xp=?, games=?, wins=?, streak=?,
+                best_streak=CASE
+                    WHEN best_streak < ? THEN ?
+                    ELSE best_streak
+                END
+            WHERE chat_id=? AND user_id=?
             """,
             (
                 xp,
                 games,
                 wins,
                 streak,
+                streak,
+                streak,
+                chat_id,
                 update.effective_user.id,
             ),
         )
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
-    # CORRECT MESSAGE
     await update.message.reply_text(
         "🎉 <b>CORRECT!</b> 🔥🔥\n\n"
         f"⚡ +{xp_reward} XP\n"
@@ -677,16 +666,15 @@ async def answer(update, context):
         parse_mode="HTML",
     )
 
-    # SMALL DELAY
     await asyncio.sleep(0.7)
 
-    # AUTO NEXT QUESTION
-    await start_game(
-        update,
-        context,
-        mode=mode,
-        difficulty=difficulty,
-    )
+    await send_next_question(
+        context.bot,
+        chat_id,
+        mode,
+        difficulty,
+            )
+
 
 # =========================================================
 # PROFILE
