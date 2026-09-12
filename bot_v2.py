@@ -306,6 +306,9 @@ def mode_menu():
             InlineKeyboardButton("🌆 City", callback_data="mode:City"),
         ],
         [
+    InlineKeyboardButton("⚡ 5-Second Panic", callback_data="mode:Panic"),
+],
+        [
             InlineKeyboardButton("🔙 Back", callback_data="menu:home"),
         ],
     ])
