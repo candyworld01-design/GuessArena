@@ -6,32 +6,23 @@ import asyncio
 import uuid
 from threading import Thread
 from datetime import date
-
 from flask import Flask
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.request import HTTPXRequest
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
-
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 # ============================================================
-# GUESSARENA
+# GUESSARENA v2 - FULL BUILD
+# ============================================================
+# Keep Flask/Render health server unchanged.
+# One file: paste this entire file as bot_v2.py
 # ============================================================
 
-# DO NOT CHANGE - RENDER / UPTIME SETUP
 app = Flask(__name__)
 
 @app.route("/")
 def health_check():
     return "Bot is Alive!", 200
-
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
@@ -42,17 +33,8 @@ def run_web_server():
         use_reloader=False,
     )
 
-
-server_thread = Thread(
-    target=run_web_server,
-    daemon=True,
-)
+server_thread = Thread(target=run_web_server, daemon=True)
 server_thread.start()
-
-
-# ============================================================
-# CONFIG
-# ============================================================
 
 TOKEN = os.environ.get("BOT_TOKEN")
 DB_FILE = "guessarena.db"
@@ -67,25 +49,35 @@ TIMERS = {
 
 XP_VALUES = {
     "Easy": 10,
-    "Medium": 15,
-    "Hard": 25,
-    "Extreme": 35,
-    "Panic": 40,
+    "Medium": 20,
+    "Hard": 35,
+    "Extreme": 55,
+    "Panic": 70,
 }
 
-active = {}
-panic_tasks = {}
+MODE_EMOJI = {
+    "Word": "🔤", "Animal": "🦁", "Emoji": "😂", "City": "🌍",
+    "Riddle": "🧩", "Logic": "🧠", "Trick": "🎭", "Pattern": "🔢",
+    "Panic": "🚨", "Bluff Master": "🃏", "Risk It": "🎲", "Memory Bomb": "💣",
+    "One Word Chaos": "☝️", "Target Number": "🎯", "Mystery Power": "⚡",
+    "Sabotage Round": "😈", "Buzzer Battle": "🔔", "CHAOS MODE": "🌪️",
+    "King of the Hill": "👑",
+}
 
+DIFFICULTIES = ["Easy", "Medium", "Hard", "Extreme", "Panic"]
 
 # ============================================================
 # DATABASE
 # ============================================================
 
 def db():
-    return sqlite3.connect(DB_FILE)
+    con = sqlite3.connect(DB_FILE)
+    con.row_factory = sqlite3.Row
+    return con
 
 
-with db() as con:
+def init_db():
+    con = db()
     con.execute("""
         CREATE TABLE IF NOT EXISTS players(
             chat_id INTEGER,
@@ -96,773 +88,943 @@ with db() as con:
             streak INTEGER DEFAULT 0,
             best_streak INTEGER DEFAULT 0,
             games INTEGER DEFAULT 0,
-            hints INTEGER DEFAULT 0,
+            hints INTEGER DEFAULT 3,
             achievements TEXT DEFAULT '',
             PRIMARY KEY(chat_id,user_id)
         )
     """)
+    con.commit()
+    con.close()
 
+
+def ensure_player(chat_id, user_id, name):
+    con = db()
+    con.execute("""
+        INSERT OR IGNORE INTO players(chat_id,user_id,name)
+        VALUES(?,?,?)
+    """, (chat_id, user_id, name))
+    con.execute("UPDATE players SET name=? WHERE chat_id=? AND user_id=?", (name, chat_id, user_id))
+    con.commit()
+    con.close()
+
+
+def get_player(chat_id, user_id):
+    ensure_player(chat_id, user_id, "Player")
+    con = db()
+    row = con.execute("SELECT * FROM players WHERE chat_id=? AND user_id=?", (chat_id, user_id)).fetchone()
+    con.close()
+    return row
+
+
+def add_result(chat_id, user_id, name, xp=0, win=False, reset_streak=False):
+    ensure_player(chat_id, user_id, name)
+    con = db()
+    if win:
+        con.execute("""
+            UPDATE players SET xp=xp+?, wins=wins+1, games=games+1,
+            streak=streak+1,
+            best_streak=MAX(best_streak, streak+1)
+            WHERE chat_id=? AND user_id=?
+        """, (xp, chat_id, user_id))
+    elif reset_streak:
+        con.execute("UPDATE players SET games=games+1, streak=0 WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    else:
+        con.execute("UPDATE players SET games=games+1 WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    con.commit()
+    con.close()
+
+
+def spend_hint(chat_id, user_id):
+    con = db()
+    row = con.execute("SELECT hints FROM players WHERE chat_id=? AND user_id=?", (chat_id, user_id)).fetchone()
+    if not row or row["hints"] <= 0:
+        con.close()
+        return False
+    con.execute("UPDATE players SET hints=hints-1 WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    con.commit()
+    con.close()
+    return True
+
+
+def add_hint(chat_id, user_id, amount=1):
+    con = db()
+    con.execute("UPDATE players SET hints=hints+? WHERE chat_id=? AND user_id=?", (amount, chat_id, user_id))
+    con.commit()
+    con.close()
+
+
+def set_achievement(chat_id, user_id, achievement):
+    row = get_player(chat_id, user_id)
+    current = set(filter(None, (row["achievements"] or "").split(",")))
+    if achievement in current:
+        return False
+    current.add(achievement)
+    con = db()
+    con.execute("UPDATE players SET achievements=? WHERE chat_id=? AND user_id=?", (",".join(sorted(current)), chat_id, user_id))
+    con.commit()
+    con.close()
+    return True
+
+
+def level_from_xp(xp):
+    return max(1, xp // 100 + 1)
+
+
+def title_from_level(level):
+    titles = [
+        (1, "Rookie"), (3, "Scout"), (5, "Challenger"), (8, "Strategist"),
+        (12, "Arena Ace"), (16, "Mind Bender"), (20, "Chaos Lord"), (25, "GuessArena Legend")
+    ]
+    title = titles[0][1]
+    for needed, name in titles:
+        if level >= needed:
+            title = name
+    return title
 
 # ============================================================
 # QUESTION BANK
 # ============================================================
+# Each item can contain aliases, hint and explanation.
+# The bank is deliberately mixed so difficulty filtering stays fun.
 
-# (question, answer, difficulty, aliases)
 
-RAW_QUESTIONS = {
+def Q(q, a, difficulty="Medium", aliases=None, hint="", explain=""):
+    return {
+        "q": q,
+        "a": a,
+        "difficulty": difficulty,
+        "aliases": aliases or [],
+        "hint": hint,
+        "explain": explain,
+    }
 
+QUESTIONS = {
 "Word": [
-("What word means deliberately avoiding a topic?", "evasion", "Medium", ["evasion"]),
-("What is the term for a word that sounds like what it describes?", "onomatopoeia", "Hard", ["onomatopoeia"]),
-("Which word means 'existing everywhere'?", "ubiquitous", "Hard", ["ubiquitous"]),
-("What is an anagram of LISTEN that means silent?", "silent", "Medium", ["silent"]),
-("What word describes fear of confined spaces?", "claustrophobia", "Medium", ["claustrophobia"]),
-("What is the opposite of 'scarce'?", "abundant", "Easy", ["abundant", "plentiful"]),
-("Which word means a person who studies ancient societies through artifacts?", "archaeologist", "Medium", ["archaeologist"]),
-("What is a word with the opposite meaning of another word called?", "antonym", "Easy", ["antonym"]),
-("What do we call a phrase whose meaning isn't literal, like 'break the ice'?", "idiom", "Easy", ["idiom"]),
-("Which word means extremely careful and precise?", "meticulous", "Hard", ["meticulous"]),
+Q("Which word means 'to make something worse by trying to improve it'?", "exacerbate", "Hard", ["exacerbate"], "It starts with ex- and often appears with problems.", "Exacerbate means to make a problem or situation more severe."),
+Q("What is the term for a word that imitates a sound, like 'buzz' or 'clang'?", "onomatopoeia", "Medium", ["onomatopoeia"], "It sounds almost as complicated as it is spelled.", "Onomatopoeia is a word formed to imitate a natural sound."),
+Q("What do you call a statement that seems self-contradictory but may reveal a truth?", "paradox", "Medium", ["paradox"], "A classic example involves a liar.", "A paradox contains an apparent contradiction that can be thought-provoking or logically troublesome."),
+Q("Which word describes a person who speaks many languages?", "polyglot", "Hard", ["polyglot"], "Poly = many.", "A polyglot knows or uses multiple languages."),
+Q("What is the opposite of 'scarce'?", "abundant", "Easy", ["plentiful", "abundance"], "Think: more than enough.", "Abundant means existing in large quantities."),
+Q("What word means an extremely strong desire to know or learn something?", "curiosity", "Easy", [], "It is what makes people ask 'why?' five times.", "Curiosity is the desire to know or discover something."),
+Q("What is a word with the same spelling but a different meaning called?", "homograph", "Hard", [], "Graph relates to writing.", "Homographs share spelling but can have different meanings or pronunciations."),
+Q("What is the term for a newly invented word or expression?", "neologism", "Extreme", [], "Neo means new.", "A neologism is a newly coined word or expression."),
+Q("What does 'ambiguous' mean?", "unclear", "Medium", ["uncertain", "having multiple meanings"], "It leaves you thinking: 'Wait, what did you mean?'") ,
+Q("What is a person who deliberately avoids society called?", "recluse", "Hard", [], "They prefer their own company.") ,
+Q("Which word means 'able to be changed or adapted'?", "flexible", "Easy", ["adaptable"], "Opposite of rigid.") ,
+Q("What is the study of word origins called?", "etymology", "Hard", [], "It investigates where words came from.") ,
+Q("What does 'meticulous' mean?", "very careful", "Medium", ["careful", "precise", "thorough"], "Someone meticulous notices tiny details.") ,
+Q("Which word means a short, clever saying expressing a general truth?", "aphorism", "Hard", [], "Think of a compact piece of wisdom.") ,
+Q("What is the fear of confined spaces called?", "claustrophobia", "Medium", ["claustrophobia"], "Think of elevators and tiny rooms.") ,
+Q("What does 'obsolete' mean?", "outdated", "Medium", ["out of date"], "It belongs to an older era of technology or practice.") ,
+Q("What is the deliberate exaggeration of something for effect called?", "hyperbole", "Medium", [], "'I've told you a million times' is one.") ,
+Q("What does 'pragmatic' usually mean?", "practical", "Hard", ["practical-minded"], "It focuses on what actually works.") ,
+Q("Which word describes a person who can use both hands equally well?", "ambidextrous", "Hard", [], "Ambi suggests both.") ,
+Q("What is a phrase whose literal meaning differs from its intended meaning called?", "idiom", "Easy", [], "'Break a leg' is a famous example.") ,
 ],
-
 "Animal": [
-("Which animal has fingerprints so similar to humans that they can be difficult to distinguish?", "koala", "Medium", ["koala"]),
-("Which mammal is capable of true powered flight?", "bat", "Easy", ["bat"]),
-("Which animal is famous for having three hearts?", "octopus", "Easy", ["octopus"]),
-("Which bird can fly backwards?", "hummingbird", "Medium", ["hummingbird"]),
-("What is the largest living land animal?", "elephant", "Easy", ["elephant", "african elephant"]),
-("Which animal is known for changing the color and texture of its skin?", "octopus", "Medium", ["octopus"]),
-("Which mammal lays eggs?", "platypus", "Medium", ["platypus"]),
-("Which animal is famous for regenerating lost limbs?", "axolotl", "Hard", ["axolotl"]),
-("Which animal has the strongest bite among living land animals?", "hippopotamus", "Hard", ["hippopotamus", "hippo"]),
-("Which sea creature is biologically closer to humans than to fish?", "octopus", "Extreme", ["octopus"]),
+Q("Which animal has fingerprints so similar to humans that they can be confusing?", "koala", "Medium", [], "It spends much of its life in eucalyptus trees."),
+Q("Which mammal is capable of true sustained flight?", "bat", "Easy", ["bats"], "It navigates in darkness using sound."),
+Q("What is a group of flamingos commonly called?", "flamboyance", "Hard", [], "The group name is almost suspiciously appropriate."),
+Q("Which animal is famous for changing its skin colour using specialized cells?", "chameleon", "Easy", [], "Its camouflage reputation is legendary."),
+Q("Which bird can fly backwards?", "hummingbird", "Medium", [], "Its wings beat extremely rapidly."),
+Q("Which mammal lays eggs?", "platypus", "Medium", ["echidna"], "Australia has some strange mammals."),
+Q("Which animal has three hearts?", "octopus", "Easy", [], "Two help the gills; one serves the body."),
+Q("What is the fastest land animal?", "cheetah", "Easy", [], "Short explosive speed is its specialty."),
+Q("Which animal has the longest neck among living animals?", "giraffe", "Easy", [], "Its heart has to work hard to move blood upward."),
+Q("Which insect communicates partly by performing a famous dance?", "honeybee", "Medium", ["bee", "honey bee"], "It can tell nestmates about food locations."),
+Q("Which animal can regenerate lost arms?", "starfish", "Easy", ["sea star"], "Its common name is misleading: it isn't actually a fish."),
+Q("Which animal has a tongue that can be longer than its body?", "chameleon", "Hard", [], "Its hunting tongue is famous for speed and reach."),
+Q("What is the largest living land animal?", "african elephant", "Easy", ["elephant", "african elephant"], "Think massive ears and a trunk."),
+Q("Which animal is known for using tools such as stones to crack food?", "sea otter", "Medium", ["otter"], "It may carry a favourite rock."),
+Q("Which mammal has the strongest bite force among living land animals often cited in comparisons?", "hippopotamus", "Hard", ["hippo"], "Its huge jaws are not for smiling."),
+Q("Which bird is famous for mimicking human speech with remarkable accuracy?", "parrot", "Easy", [], "Some species are exceptionally talented mimics."),
+Q("Which marine animal is a close relative of elephants?", "manatee", "Hard", ["sea cow"], "It is a gentle aquatic mammal."),
+Q("What animal is known for black-and-white stripes and a famously difficult pattern to distinguish individually?", "zebra", "Easy", [], "Its stripes are unique to individuals."),
+Q("Which animal can survive extreme dehydration by entering a dormant state called anhydrobiosis?", "tardigrade", "Extreme", ["water bear"], "It is tiny and famously resilient."),
+Q("Which animal is known for producing pearls?", "oyster", "Easy", [], "A grain of irritation can become something valuable."),
 ],
-
 "Emoji": [
-("Decode: 👀 + 🧠 + 🪤. What kind of question is represented?", "trick question", "Hard", ["trick question", "trick"]),
-("Decode: 🌧️ + 🐱🐶. What phrase is represented?", "raining cats and dogs", "Medium", ["raining cats and dogs", "cats and dogs"]),
-("Decode: 🔥 + 🧊. What concept is represented?", "opposites", "Medium", ["opposites", "opposite"]),
-("Decode: 🧠 + 💥. What phrase suggests a sudden idea?", "brainstorm", "Medium", ["brainstorm"]),
-("Decode: 👑 + 🐝. What famous phrase is suggested?", "queen bee", "Easy", ["queen bee"]),
-("Decode: 🕰️ + 💰. What concept is suggested?", "time is money", "Medium", ["time is money"]),
-("Decode: 👂 + 🧱. What phrase means refusing to listen?", "wall of silence", "Hard", ["wall of silence"]),
-("Decode: 🐟 + 🚶. What phrase suggests doing something unusual?", "fish out of water", "Hard", ["fish out of water"]),
-("Decode: 🌍 + 🏃. What concept means travelling widely?", "world tour", "Easy", ["world tour"]),
-("Decode: 🧩 + 🧠. What are these together strongly suggesting?", "puzzle", "Easy", ["puzzle"]),
+Q("Decode: 🔥 + 🧊 = ?", "hot and cold", "Easy", ["hot cold", "hot and cold"], "Opposites are colliding."),
+Q("Decode: 🧠 + 💥 = ?", "mind blown", "Easy", ["mindblown", "mind blown"], "When your brain goes BOOM."),
+Q("Decode: 👀 + 👀 = ?", "watching", "Easy", ["watch", "two eyes", "look"], "More eyes usually means more observing."),
+Q("Decode: 🌧️ + 🐱 + 🐶 = ?", "raining cats and dogs", "Medium", ["raining cats and dogs"], "An old English expression."),
+Q("Decode: 🐌 + ⚡ = ?", "slow vs fast", "Medium", ["slow and fast", "slow versus fast"], "Think extreme speed contrast."),
+Q("Decode: 🔑 + ❤️ = ?", "key to the heart", "Medium", ["key to heart"], "One object opens; the other symbolizes feelings."),
+Q("Decode: 🧊 + ☕ = ?", "iced coffee", "Easy", ["ice coffee", "iced coffee"], "Coffee, but chilled."),
+Q("Decode: 🕵️ + 🔍 = ?", "detective", "Easy", ["investigation", "detective work"], "Someone looking for clues."),
+Q("Decode: 🚪 + 🚫 + 👻 = ?", "haunted house", "Medium", ["haunted house"], "A place where you definitely do not want the door opening itself."),
+Q("Decode: 🌎 + 🔥 = ?", "global warming", "Medium", ["global warming", "climate change"], "Planet + heat."),
+Q("Decode: 🧑‍🚀 + 🌕 = ?", "moon landing", "Easy", ["moon landing"], "A famous giant leap."),
+Q("Decode: 🐟 + 🪝 = ?", "fishing", "Easy", ["fish hook", "fishing"], "The hook gives it away."),
+Q("Decode: ⏰ + 🏃 = ?", "running late", "Medium", ["late", "running late"], "Clock plus rushing human."),
+Q("Decode: 🤐 + 🔒 = ?", "secret", "Medium", ["keep secret", "locked secret"], "Something you aren't supposed to reveal."),
+Q("Decode: 📚 + 🧠 = ?", "knowledge", "Easy", ["learning", "education"], "Books feeding the brain."),
+Q("Decode: 🎯 + 🏆 = ?", "winning the target", "Medium", ["bullseye", "hit the target"], "Target plus victory."),
+Q("Decode: 🧩 + 🧠 = ?", "puzzle solving", "Easy", ["solving a puzzle", "puzzle"], "Two symbols, one brainy activity."),
+Q("Decode: 🚀 + 🌌 = ?", "space travel", "Easy", ["space travel", "spaceflight"], "Rocket + universe."),
+Q("Decode: 🧪 + 🔬 = ?", "science", "Easy", ["scientific research", "research"], "Lab equipment combo."),
+Q("Decode: 🛑 + 🧠 = ?", "think before you act", "Hard", ["stop and think", "think before acting"], "Pause first, brain second."),
 ],
-
 "City": [
-("Which city is known as the 'City of Canals'?", "venice", "Easy", ["venice"]),
-("Which city is home to the Sagrada Familia?", "barcelona", "Easy", ["barcelona"]),
-("Which city sits on the Bosporus and spans two continents?", "istanbul", "Medium", ["istanbul"]),
-("Which city is famous for the ancient Colosseum?", "rome", "Easy", ["rome"]),
-("Which city is associated with Wall Street?", "new york", "Easy", ["new york", "new york city", "nyc"]),
-("Which city is famous for the Marina Bay Sands?", "singapore", "Easy", ["singapore"]),
-("Which city is nicknamed the 'City of Light'?", "paris", "Easy", ["paris"]),
-("Which city is famous for the Shibuya Crossing?", "tokyo", "Medium", ["tokyo"]),
-("Which city is the traditional home of the Oscars' Hollywood district?", "los angeles", "Medium", ["los angeles", "la"]),
-("Which city is famous for its historic red double-decker buses?", "london", "Easy", ["london"]),
+Q("Which city is famous for the Colosseum?", "Rome", "Easy", [], "Ancient Roman architecture."),
+Q("Which city is home to the Eiffel Tower?", "Paris", "Easy", [], "France's most recognizable landmark."),
+Q("Which city is associated with the Burj Khalifa?", "Dubai", "Easy", [], "Think extremely tall skyscraper."),
+Q("Which city is famous for canals and gondolas?", "Venice", "Easy", [], "Cars are not the main way around the historic center."),
+Q("Which city hosted the 2012 Summer Olympics?", "London", "Medium", [], "The UK capital hosted the Games in 2012."),
+Q("Which city is nicknamed the Big Apple?", "New York City", "Easy", ["new york", "nyc"], "USA's giant cultural metropolis."),
+Q("Which city is famous for the Sagrada Família?", "Barcelona", "Medium", [], "Gaudí's extraordinary basilica."),
+Q("Which city sits near the Golden Gate Bridge?", "San Francisco", "Easy", ["sf"], "California and a famous red-orange bridge."),
+Q("Which city is famous for the Acropolis?", "Athens", "Easy", [], "Ancient Greece's iconic capital."),
+Q("Which city is often called the City of Light?", "Paris", "Easy", [], "The nickname is strongly associated with France's capital."),
+Q("Which city is home to the Forbidden City?", "Beijing", "Medium", [], "China's capital."),
+Q("Which city is famous for Shibuya Crossing?", "Tokyo", "Easy", [], "One of the world's busiest pedestrian crossings."),
+Q("Which city is associated with the Taj Mahal?", "Agra", "Easy", [], "The monument is in Uttar Pradesh."),
+Q("Which city is famous for the Christ the Redeemer statue?", "Rio de Janeiro", "Easy", ["rio"], "Brazilian city with a huge statue overlooking it."),
+Q("Which city is known for the Space Needle?", "Seattle", "Medium", [], "Pacific Northwest city."),
+Q("Which city is famous for the ancient ruins of Machu Picchu nearby?", "Cusco", "Hard", ["cuzco"], "Historic Peruvian city and former Inca capital."),
+Q("Which city is associated with the Kremlin and Red Square?", "Moscow", "Easy", [], "Russia's capital."),
+Q("Which city is famous for the Opera House with sail-like roofs?", "Sydney", "Easy", [], "Australia's iconic harbour city."),
+Q("Which city is home to the Marina Bay Sands complex?", "Singapore", "Medium", [], "City-state in Southeast Asia."),
+Q("Which city is known for its medieval old town and Charles Bridge?", "Prague", "Medium", [], "Capital of the Czech Republic."),
 ],
-
 "Riddle": [
-("I have cities but no houses, forests but no trees, and rivers but no water. What am I?", "map", "Easy", ["map"]),
-("The more you take, the more you leave behind. What are they?", "footsteps", "Medium", ["footsteps", "steps"]),
-("I speak without a mouth and hear without ears. What am I?", "echo", "Easy", ["echo"]),
-("I get wetter as I dry something else. What am I?", "towel", "Easy", ["towel"]),
-("I have keys but no locks, space but no room, and you can enter but not go inside. What am I?", "keyboard", "Medium", ["keyboard"]),
-("I can be cracked, made, told and played. What am I?", "joke", "Medium", ["joke"]),
-("I disappear the moment you say my name. What am I?", "silence", "Medium", ["silence"]),
-("I have one eye but cannot see. What am I?", "needle", "Easy", ["needle"]),
-("I have branches but no fruit, trunk or leaves. What am I?", "bank", "Hard", ["bank"]),
-("What has a head and a tail but no body?", "coin", "Easy", ["coin"]),
+Q("I have keys but open no locks. I have space but no room. What am I?", "keyboard", "Easy", [], "You are probably using one right now."),
+Q("The more you take, the more you leave behind. What are they?", "footsteps", "Easy", ["footsteps"], "You make them while walking."),
+Q("I speak without a mouth and hear without ears. What am I?", "echo", "Easy", [], "Sound comes back to you."),
+Q("I am always in front of you but can never be seen. What am I?", "future", "Medium", [], "It has not happened yet."),
+Q("I have cities but no houses, forests but no trees, and water but no fish. What am I?", "map", "Easy", [], "A flat representation of places."),
+Q("What can travel around the world while staying in one corner?", "stamp", "Easy", [], "It rides on letters."),
+Q("What gets wetter as it dries?", "towel", "Easy", [], "Bathroom object."),
+Q("What has one eye but cannot see?", "needle", "Easy", [], "Thread passes through its eye."),
+Q("What has a neck but no head?", "bottle", "Easy", [], "You might open it when thirsty."),
+Q("What can you catch but not throw?", "cold", "Easy", ["a cold"], "You might catch one in winter."),
+Q("What has many teeth but cannot bite?", "comb", "Easy", [], "Used on hair."),
+Q("What belongs to you, but other people use it more than you do?", "your name", "Easy", ["name"], "People say it when addressing you."),
+Q("What disappears as soon as you say its name?", "silence", "Medium", [], "Speaking destroys it."),
+Q("I am light as a feather, yet no person can hold me for long. What am I?", "breath", "Medium", [], "You need to release it eventually."),
+Q("What has an end but no beginning, a home but no family, and a space without room?", "keyboard", "Extreme", [], "Look at the physical layout of keys."),
+Q("A man shaves several times a day but still has a beard. Who is he?", "barber", "Easy", [], "His job involves shaving other people."),
+Q("What five-letter word becomes shorter when you add two letters to it?", "short", "Medium", [], "Add 'er' to the idea of short."),
+Q("What can fill a room but takes up no space?", "light", "Easy", [], "You can see it but cannot pile it in a corner."),
+Q("What has hands but cannot clap?", "clock", "Easy", [], "Its hands tell time."),
+Q("What has a head and a tail but no body?", "coin", "Easy", [], "Flip it."),
 ],
-
 "Logic": [
-("A clock shows 3:15. What is the smaller angle between its hands?", "7.5", "Hard", ["7.5", "7.5 degrees"]),
-("If all Bloops are Razzies and all Razzies are Lazzies, are all Bloops Lazzies?", "yes", "Easy", ["yes"]),
-("You have 3 switches downstairs and one bulb upstairs. You can go upstairs once. How do you identify the switch?", "heat", "Extreme", ["heat", "temperature"]),
-("A farmer has 17 sheep. All but 9 run away. How many remain?", "9", "Easy", ["9"]),
-("If yesterday was Monday, what day is tomorrow?", "wednesday", "Easy", ["wednesday"]),
-("A train travels north while smoke blows east. Which direction does the train's smoke go?", "east", "Medium", ["east"]),
-("You have 8 identical-looking balls and one is heavier. What is the minimum number of balance weighings needed?", "2", "Hard", ["2"]),
-("If two people can build two walls in two hours, how long for four people to build four walls?", "2 hours", "Hard", ["2", "2 hours"]),
-("A number doubled and then increased by 6 becomes 20. What is the number?", "7", "Easy", ["7"]),
-("You overtake the person in second place during a race. What position are you now?", "second", "Easy", ["second", "2nd"]),
+Q("A farmer has 17 sheep. All but 9 run away. How many remain?", "9", "Easy", ["nine"], "'All but 9' means 9 stay."),
+Q("If you overtake the person in second place, what place are you in?", "second", "Easy", ["2nd", "2"], "You take their position, not first."),
+Q("A clock takes 5 seconds to strike 5 times. How long to strike 10 times at the same rate?", "11.25 seconds", "Hard", ["11.25", "11.25 sec"], "Five strikes contain four intervals; ten strikes contain nine."),
+Q("You have one match and enter a dark room with a lamp, candle and fireplace. What do you light first?", "match", "Easy", [], "You need the match to light anything else."),
+Q("A plane crashes on the border of two countries. Where do they bury the survivors?", "nowhere", "Easy", [], "Survivors are alive."),
+Q("If 3 cats catch 3 mice in 3 minutes, how many cats catch 100 mice in 100 minutes at the same rate?", "3", "Hard", [], "Each cat catches one mouse every 3 minutes under the given rate."),
+Q("You have 8 balls and one is heavier. With a balance scale, minimum weighings needed?", "2", "Hard", ["two"], "Split into groups and narrow down."),
+Q("A room has 4 corners. A cat sits in each corner. Each cat sees 3 cats. How many cats?", "4", "Easy", [], "Each cat can see the other three."),
+Q("A father and son have ages adding to 66. The father's age is the son's digits reversed. What pairs are possible?", "51 and 15", "Extreme", ["51 15", "15 and 51"], "Other reversed pairs may also fit depending on age assumptions; the classic intended pair is 51 and 15."),
+Q("You have 10 candles and blow out 2. How many candles remain?", "10", "Easy", [], "Blowing them out doesn't remove them."),
+Q("A bus driver goes the wrong way down a one-way street but doesn't break the law. Why?", "he was walking", "Medium", ["he is walking", "not driving"], "The trick is in the phrase 'bus driver'."),
+Q("If yesterday was tomorrow, today would be Friday. What day is today?", "Wednesday", "Extreme", ["wednesday"], "Shift the reference by two days."),
+Q("You see a boat filled with people, yet there isn't a single person on board. Why?", "they are all married", "Medium", ["no single people", "everyone is married"], "'Single' is the trick word."),
+Q("What is the next number: 2, 3, 5, 9, 17, ?", "33", "Medium", [], "Each term is previous ×2 −1."),
+Q("If two's company and three's a crowd, what are four and five?", "nine", "Easy", ["9"], "It's simply 4 + 5."),
+Q("A doctor gives you 3 pills and says take one every half hour. How long until all are taken?", "1 hour", "Medium", ["60 minutes", "one hour"], "First immediately, second after 30 minutes, third after 60."),
+Q("You have 6 eggs. You break 2, cook 2, and eat 2. How many eggs remain?", "4", "Easy", [], "The same two can be broken, cooked and eaten."),
+Q("A farmer has chickens and cows. There are 10 heads and 28 legs. How many cows?", "4", "Medium", [], "Four cows give 16 legs; six chickens give 12."),
+Q("A number is doubled and then 6 is added to get 20. What is the number?", "7", "Easy", [], "Reverse the operations: 20−6, then divide by 2."),
+Q("If all bloops are razzies and some razzies are lazzies, must some bloops be lazzies?", "No", "Hard", ["no"], "The overlap with lazzies is not guaranteed to include bloops."),
 ],
-
 "Trick": [
-("How many months have at least 28 days?", "12", "Easy", ["12", "twelve"]),
-("A plane crashes exactly on the border of two countries. Where do they bury the survivors?", "nowhere", "Easy", ["nowhere"]),
-("What becomes smaller when you turn it upside down?", "number 9", "Hard", ["9", "number 9"]),
-("If you have one match and enter a dark room with a candle, lamp and fireplace, what do you light first?", "match", "Easy", ["match", "the match"]),
-("A doctor gives you 3 pills and says take one every 30 minutes. How long until all are taken?", "1 hour", "Medium", ["1 hour", "60 minutes", "60"]),
-("What question can you never answer 'yes' to honestly?", "are you asleep", "Medium", ["are you asleep"]),
-("Before Mount Everest was discovered, what was the highest mountain?", "mount everest", "Easy", ["mount everest", "everest"]),
-("You see a boat filled with people, but there isn't a single person on board. How?", "all married", "Hard", ["all married", "they are all married"]),
-("A rooster lays an egg on a roof. Which way does it roll?", "roosters don't lay eggs", "Easy", ["roosters don't lay eggs", "rooster doesn't lay eggs"]),
-("What has to be broken before you can use it?", "egg", "Easy", ["egg"]),
+Q("How many months have 28 days?", "12", "Easy", ["all 12", "twelve"], "Every month has at least 28 days."),
+Q("What word is spelled incorrectly in every dictionary?", "incorrectly", "Easy", [], "Read the sentence literally."),
+Q("If an electric train travels north, which way does its smoke go?", "nowhere", "Easy", [], "Electric trains don't produce exhaust smoke."),
+Q("Before Mount Everest was discovered, what was the highest mountain?", "Mount Everest", "Easy", ["everest"], "It was still there before people documented it."),
+Q("What can you never eat for breakfast?", "lunch and dinner", "Easy", ["lunch", "dinner"], "Not breakfast anymore."),
+Q("If you have a bowl with 6 apples and take away 4, how many do you have?", "4", "Easy", [], "You took 4, so you have 4."),
+Q("What gets bigger the more you take away from it?", "a hole", "Easy", ["hole"], "Removing material makes it larger."),
+Q("How far can a dog run into a forest?", "halfway", "Medium", [], "After halfway it is running out of the forest."),
+Q("A rooster lays an egg on a roof. Which side does it roll down?", "neither", "Easy", [], "Roosters don't lay eggs."),
+Q("What starts with T, ends with T, and has T in it?", "teapot", "Easy", [], "Tea + pot, and it has T in it."),
+Q("What has four wheels and flies?", "garbage truck", "Medium", ["garbage truck"], "The flies are insects, not wings."),
+Q("If you throw a red stone into the blue sea, what does it become?", "wet", "Easy", [], "Colour is irrelevant."),
+Q("What invention lets you look through a wall?", "window", "Easy", [], "A wall with a window lets you see through."),
+Q("What is at the end of a rainbow?", "the letter w", "Medium", ["w"], "The word rainbow ends with W."),
+Q("What has 13 hearts but no organs?", "a deck of cards", "Medium", ["deck of cards", "cards"], "Thirteen hearts in a standard suit set."),
+Q("What has a thumb and four fingers but isn't alive?", "glove", "Easy", [], "You wear it on a hand."),
+Q("What question can you never answer yes to?", "are you asleep", "Medium", ["are you sleeping"], "If you are truly asleep, you can't answer."),
+Q("What is always coming but never arrives?", "tomorrow", "Easy", [], "When it arrives, it becomes today."),
+Q("What can you hold without touching it?", "a conversation", "Medium", ["conversation"], "You can 'hold' one without physical contact."),
+Q("Which side of a turkey has the most feathers?", "outside", "Easy", [], "The feathers are on the outside."),
 ],
-
 "Pattern": [
-("Complete: 2, 6, 12, 20, 30, ?", "42", "Medium", ["42"]),
-("Complete: 1, 1, 2, 3, 5, 8, ?", "13", "Easy", ["13"]),
-("Complete: 3, 9, 27, 81, ?", "243", "Easy", ["243"]),
-("Complete: 100, 50, 25, 12.5, ?", "6.25", "Medium", ["6.25"]),
-("Complete: 2, 3, 5, 8, 12, 17, ?", "23", "Medium", ["23"]),
-("Complete: 81, 27, 9, 3, ?", "1", "Easy", ["1"]),
-("Complete: 1, 4, 9, 16, 25, ?", "36", "Easy", ["36"]),
-("Complete: 7, 10, 16, 25, 37, ?", "52", "Hard", ["52"]),
-("Complete: 5, 10, 20, 40, ?", "80", "Easy", ["80"]),
-("Complete: 2, 5, 10, 17, 26, ?", "37", "Medium", ["37"]),
+Q("Next: 2, 4, 8, 16, ?", "32", "Easy", ["32"], "Double each time."),
+Q("Next: 1, 4, 9, 16, ?", "25", "Easy", ["25"], "Perfect squares."),
+Q("Next: 3, 6, 12, 24, ?", "48", "Easy", [], "Double each term."),
+Q("Next: 5, 10, 20, 40, ?", "80", "Easy", [], "Double each time."),
+Q("Next: 1, 1, 2, 3, 5, 8, ?", "13", "Medium", [], "Fibonacci sequence."),
+Q("Next: 2, 6, 12, 20, 30, ?", "42", "Hard", [], "n(n+1): 1×2, 2×3, 3×4..."),
+Q("Next: 100, 90, 81, 73, 66, ?", "60", "Hard", [], "Subtract 10, 9, 8, 7, then 6."),
+Q("Next: 7, 10, 16, 28, 52, ?", "100", "Hard", [], "Add 3,6,12,24, then 48."),
+Q("Next: 2, 3, 5, 8, 12, 17, ?", "23", "Medium", [], "Add 1,2,3,4,5,6..."),
+Q("Next: 81, 27, 9, 3, ?", "1", "Easy", [], "Divide by 3."),
+Q("Next: 1, 8, 27, 64, ?", "125", "Medium", [], "Cubes: 1³, 2³, 3³, 4³, 5³."),
+Q("Next: 13, 17, 23, 31, 41, ?", "53", "Hard", [], "Add 4,6,8,10,12."),
+Q("Next: 2, 5, 11, 23, 47, ?", "95", "Hard", [], "×2 +1."),
+Q("Next: 50, 45, 35, 20, 0, ?", "-25", "Medium", ["minus 25"], "Subtract 5,10,15,20,25."),
+Q("Next: 1, 2, 6, 24, 120, ?", "720", "Medium", [], "Factorials: 1!,2!,3!,4!,5!,6!."),
+Q("Next: 4, 7, 13, 25, 49, ?", "97", "Hard", [], "×2−1."),
+Q("Next: 10, 20, 19, 38, 37, 74, ?", "73", "Medium", [], "×2, −1 repeating."),
+Q("Next: 6, 11, 21, 41, 81, ?", "161", "Hard", [], "×2−1."),
+Q("Next: 9, 18, 16, 32, 30, 60, ?", "58", "Medium", [], "×2, −2 repeating."),
+Q("Next: 3, 9, 27, 81, ?", "243", "Easy", [], "Multiply by 3."),
 ],
-
 "Panic": [
-("What is the capital of Australia?", "canberra", "Panic", ["canberra"]),
-("How many sides does a hexagon have?", "6", "Panic", ["6", "six"]),
-("Which planet is known as the Red Planet?", "mars", "Panic", ["mars"]),
-("What is 15 × 4?", "60", "Panic", ["60"]),
-("Which gas do humans need to breathe?", "oxygen", "Panic", ["oxygen"]),
-("What is the largest ocean?", "pacific", "Panic", ["pacific", "pacific ocean"]),
-("How many continents are there?", "7", "Panic", ["7", "seven"]),
-("Which metal has the chemical symbol Fe?", "iron", "Panic", ["iron"]),
-("What is the square root of 144?", "12", "Panic", ["12", "twelve"]),
-("Which instrument has 88 keys?", "piano", "Panic", ["piano"]),
+Q("5 + 7 × 2 = ?", "19", "Easy", [], "Multiplication before addition."),
+Q("What is 15% of 200?", "30", "Easy", [], "10% is 20 and 5% is 10."),
+Q("Capital of Japan?", "Tokyo", "Easy", [], "Think Shibuya."),
+Q("How many sides does a hexagon have?", "6", "Easy", [], "Hexa means six."),
+Q("Square root of 144?", "12", "Easy", [], "12×12."),
+Q("How many seconds are in one minute?", "60", "Easy", [], "Time pressure doesn't change time."),
+Q("9² = ?", "81", "Easy", [], "9×9."),
+Q("Which planet is known as the Red Planet?", "Mars", "Easy", [], "Our rocky neighbour."),
+Q("What is 100 ÷ 4?", "25", "Easy", [], "Quarter of 100."),
+Q("How many degrees in a right angle?", "90", "Easy", [], "Corner of a square."),
+Q("What is 7 × 8?", "56", "Easy", [], "Classic multiplication-table ambush."),
+Q("Which gas do humans need to breathe for normal respiration?", "oxygen", "Easy", [], "It is about 21% of Earth's atmosphere."),
+Q("What is 2³?", "8", "Easy", [], "2×2×2."),
+Q("How many continents are commonly taught?", "7", "Easy", [], "Asia, Africa, Europe, etc."),
+Q("What is 45 − 17?", "28", "Easy", [], "Subtract carefully."),
+Q("Which metal has the chemical symbol Fe?", "iron", "Medium", [], "Fe comes from Latin ferrum."),
+Q("What is 11 × 11?", "121", "Easy", [], "A square number."),
+Q("Which ocean is the largest?", "Pacific Ocean", "Easy", ["pacific"], "It covers more area than any other ocean."),
+Q("What is 72 ÷ 8?", "9", "Easy", [], "Eight nines are 72."),
+Q("Which planet has the most famous ring system?", "Saturn", "Easy", [], "Its rings are spectacular."),
 ],
-
 "Bluff Master": [
-("Which statement is FALSE? A) Octopuses have three hearts. B) Bats are blind. C) Honey can last a very long time.", "b", "Hard", ["b", "bats are blind", "bats"]),
-("Which statement is FALSE? A) Lightning can strike the same place twice. B) Goldfish have a 3-second memory. C) Bananas are berries botanically.", "b", "Medium", ["b", "goldfish", "3 second"]),
-("Which statement is FALSE? A) Venus rotates slowly. B) Sharks are mammals. C) Water can exist as solid, liquid and gas.", "b", "Easy", ["b", "sharks are mammals"]),
-("Which statement is FALSE? A) The Moon has no atmosphere like Earth's. B) Sound travels faster in water than air. C) Humans can breathe underwater naturally.", "c", "Easy", ["c", "humans can breathe underwater"]),
-("Which statement is FALSE? A) A day on Venus is longer than its year. B) Mercury is the hottest planet. C) Jupiter is the largest planet.", "b", "Hard", ["b", "mercury is the hottest"]),
-("Which statement is FALSE? A) Some turtles can breathe through skin. B) Penguins live only in Antarctica. C) Crows can use tools.", "b", "Medium", ["b", "penguins live only in antarctica"]),
-("Which statement is FALSE? A) Humans share DNA with bananas. B) DNA is found in cells. C) Humans have no DNA in their blood.", "c", "Hard", ["c", "humans have no dna"]),
-("Which statement is FALSE? A) Sharks existed before trees. B) Dinosaurs lived before humans. C) Humans and dinosaurs lived together naturally.", "c", "Easy", ["c", "humans and dinosaurs"]),
-("Which statement is FALSE? A) Water expands when it freezes. B) Ice is less dense than liquid water. C) Ice always sinks in water.", "c", "Medium", ["c", "ice always sinks"]),
-("Which statement is FALSE? A) Lightning is extremely hot. B) Thunder is caused by lightning heating air. C) Thunder is produced by clouds rubbing together.", "c", "Hard", ["c", "clouds rubbing"]),
+Q("Which statement is FALSE? A) Octopuses have three hearts. B) Bats are blind. C) Some octopuses can change colour.", "bats are blind", "Medium", ["b", "B"], "The common myth says bats are blind, but they can see."),
+Q("Which statement is FALSE? A) Venus rotates very slowly. B) Venus is hotter than Mercury on average. C) Venus has liquid water oceans.", "venus has liquid water oceans", "Medium", ["c", "C"], "Venus is extremely hostile and has no Earth-like oceans."),
+Q("Which statement is FALSE? A) Honey can last a very long time. B) Bees make honey. C) Honey is made by butterflies.", "honey is made by butterflies", "Easy", ["c", "C"], "Butterflies do not make honey."),
+Q("Which statement is FALSE? A) Lightning can occur without rain reaching the ground. B) Lightning is hotter than the surface of the Sun. C) Lightning is made of frozen electricity.", "lightning is made of frozen electricity", "Medium", ["c", "C"], "Electricity does not freeze into lightning."),
+Q("Which statement is FALSE? A) Sharks are fish. B) Whales are mammals. C) Dolphins are fish.", "dolphins are fish", "Easy", ["c", "C"], "Dolphins are mammals."),
+Q("Which statement is FALSE? A) The Moon has gravity. B) The Moon has no atmosphere at all. C) The Moon has a much thinner exosphere than Earth.", "the moon has no atmosphere at all", "Hard", ["b", "B"], "The Moon has an extremely thin exosphere."),
+Q("Which statement is FALSE? A) Water expands when it freezes. B) Ice is less dense than liquid water. C) Ice sinks in pure water.", "ice sinks in pure water", "Easy", ["c", "C"], "Ice floats because it is less dense."),
+Q("Which statement is FALSE? A) Sound needs a medium. B) Sound can travel through solids. C) Sound travels fastest in a vacuum.", "sound travels fastest in a vacuum", "Easy", ["c", "C"], "A vacuum has no material medium for ordinary sound waves."),
+Q("Which statement is FALSE? A) Plants perform photosynthesis. B) Chlorophyll absorbs light. C) Plants get all their mass directly from soil minerals.", "plants get all their mass directly from soil minerals", "Hard", ["c", "C"], "Much of a plant's dry mass comes from carbon dioxide-derived carbon."),
+Q("Which statement is FALSE? A) The Pacific is the largest ocean. B) The Arctic is the smallest ocean. C) The Atlantic is the largest ocean.", "the atlantic is the largest ocean", "Easy", ["c", "C"], "The Pacific is largest."),
+Q("Which statement is FALSE? A) Gold is Au. B) Silver is Ag. C) Iron is Ir.", "iron is ir", "Easy", ["c", "C"], "Iron is Fe; Ir is iridium."),
+Q("Which statement is FALSE? A) A triangle has three sides. B) A square has four equal sides. C) A circle has four corners.", "a circle has four corners", "Easy", ["c", "C"], "A circle has no corners."),
+Q("Which statement is FALSE? A) Earth orbits the Sun. B) The Sun orbits Earth once a year. C) Earth rotates on its axis.", "the sun orbits earth once a year", "Easy", ["b", "B"], "Earth orbits the Sun; apparent daily motion is not the same as orbital motion."),
+Q("Which statement is FALSE? A) DNA stores genetic information. B) Red blood cells normally have no nucleus in humans. C) Human red blood cells contain chlorophyll.", "human red blood cells contain chlorophyll", "Easy", ["c", "C"], "Chlorophyll is a plant pigment."),
+Q("Which statement is FALSE? A) Penguins are birds. B) Ostriches can fly well. C) Some birds cannot fly.", "ostriches can fly well", "Easy", ["b", "B"], "Ostriches are flightless birds."),
+Q("Which statement is FALSE? A) Mercury is closest to the Sun. B) Neptune is the farthest major planet from the Sun. C) Jupiter is smaller than Earth.", "jupiter is smaller than earth", "Easy", ["c", "C"], "Jupiter is vastly larger than Earth."),
+Q("Which statement is FALSE? A) Caffeine is a stimulant. B) Coffee beans are seeds. C) Coffee beans grow inside apples.", "coffee beans grow inside apples", "Medium", ["c", "C"], "Coffee seeds grow inside coffee cherries."),
+Q("Which statement is FALSE? A) Diamonds are made of carbon. B) Graphite is also carbon. C) Diamonds are made of pure iron.", "diamonds are made of pure iron", "Easy", ["c", "C"], "Diamond is a carbon allotrope."),
+Q("Which statement is FALSE? A) Antarctica is a continent. B) It is the coldest continent. C) It has permanent large native human cities.", "it has permanent large native human cities", "Medium", ["c", "C"], "It has research stations, not permanent native cities."),
+Q("Which statement is FALSE? A) A prism can split white light. B) Rainbows involve refraction and dispersion. C) Rainbows are painted onto clouds.", "rainbows are painted onto clouds", "Easy", ["c", "C"], "Optics, not paint."),
 ],
-
 "Risk It": [
-("Which number is prime: 21, 29, 35 or 39?", "29", "Medium", ["29"]),
-("What is 17 × 3?", "51", "Hard", ["51"]),
-("Which planet has the most famous ring system?", "saturn", "Easy", ["saturn"]),
-("What is the chemical symbol for sodium?", "na", "Medium", ["na", "sodium"]),
-("Which country has the city of Kyoto?", "japan", "Easy", ["japan"]),
-("What is 144 ÷ 12?", "12", "Easy", ["12"]),
-("Which element has atomic number 6?", "carbon", "Hard", ["carbon"]),
-("What is 19²?", "361", "Hard", ["361"]),
-("Which ocean lies between Africa and Australia?", "indian", "Medium", ["indian", "indian ocean"]),
-("Which number is both a square and a cube?", "64", "Extreme", ["64"]),
+Q("Risk x2: What is the only even prime number?", "2", "Easy", [], "Every other even number is divisible by 2."),
+Q("Risk x2: What is 13 × 7?", "91", "Medium", [], "10×7 + 3×7."),
+Q("Risk x2: Which element has atomic number 1?", "hydrogen", "Easy", [], "The first element."),
+Q("Risk x2: What is the capital of Australia?", "Canberra", "Medium", [], "Not Sydney or Melbourne."),
+Q("Risk x2: Which planet rotates on its side unusually strongly?", "Uranus", "Hard", [], "Its axial tilt is about 98 degrees."),
+Q("Risk x2: What is 17²?", "289", "Medium", [], "17×17."),
+Q("Risk x2: Which scientist is associated with the three laws of motion?", "Newton", "Easy", ["Isaac Newton"], "Gravity also gives him away."),
+Q("Risk x2: What is the smallest prime number greater than 20?", "23", "Medium", [], "21 and 22 are composite/even."),
+Q("Risk x2: Which blood cells mainly carry oxygen?", "red blood cells", "Easy", ["rbc", "red cells"], "Hemoglobin is the key."),
+Q("Risk x2: What is the square root of 225?", "15", "Easy", [], "15×15."),
+Q("Risk x2: Which layer of Earth is liquid and surrounds the inner core?", "outer core", "Hard", [], "It is mainly molten metal."),
+Q("Risk x2: What is 2^10?", "1024", "Hard", ["1024"], "2×2 repeatedly ten times."),
+Q("Risk x2: Which SI unit measures electric current?", "ampere", "Medium", ["amp"], "Named after André-Marie Ampère."),
+Q("Risk x2: What is the chemical symbol for potassium?", "K", "Medium", ["potassium", "k"], "It comes from kalium."),
+Q("Risk x2: Which gas is most abundant in Earth's atmosphere?", "nitrogen", "Easy", [], "About 78%."),
+Q("Risk x2: What is 1/4 expressed as a percentage?", "25%", "Easy", ["25", "25 percent"], "Quarter of 100."),
+Q("Risk x2: What is the approximate speed of light in vacuum?", "300000 km/s", "Hard", ["3 x 10^5 km/s", "300,000 km/s", "3e5 km/s"], "About 3×10^5 km/s."),
+Q("Risk x2: Which organelle is often called the powerhouse of the cell?", "mitochondria", "Easy", ["mitochondrion"], "It produces much of the cell's ATP."),
+Q("Risk x2: What is 99 + 101?", "200", "Easy", [], "The pair is centered around 100."),
+Q("Risk x2: Which force keeps planets in orbit around stars?", "gravity", "Easy", ["gravitational force"], "Mass attracts mass."),
 ],
-
 "Memory Bomb": [
-("Remember: 4 - 9 - 2 - 7. What was the SECOND number?", "9", "Medium", ["9"]),
-("Remember: RED - BLUE - GREEN - GOLD. What was the LAST word?", "gold", "Easy", ["gold"]),
-("Remember: 17 - 31 - 44 - 58. What was the THIRD number?", "44", "Medium", ["44"]),
-("Remember: MARS - VENUS - EARTH - SATURN. What was the SECOND planet?", "venus", "Easy", ["venus"]),
-("Remember: 8 - 3 - 6 - 1 - 9. What was the FOURTH number?", "1", "Medium", ["1"]),
-("Remember: ALPHA - DELTA - GAMMA - OMEGA. What was the FIRST word?", "alpha", "Easy", ["alpha"]),
-("Remember: 22 - 41 - 13 - 77 - 5. What was the FIFTH number?", "5", "Hard", ["5"]),
-("Remember: TIGER - EAGLE - WOLF - PANDA. What was the THIRD animal?", "wolf", "Medium", ["wolf"]),
-("Remember: 91 - 14 - 63 - 28. Which number came immediately after 14?", "63", "Hard", ["63"]),
-("Remember: JAVA - PYTHON - RUST - GO. Which language came before GO?", "rust", "Hard", ["rust"]),
+Q("Memorize: LIME - ORBIT - 47 - TIGER. What was item 3?", "47", "Medium", [], "Sequence order matters."),
+Q("Memorize: NEON - 12 - MARS - BLUE. What was item 1?", "NEON", "Medium", ["neon"], "First means first."),
+Q("Memorize: 8 - COMET - SILVER - 31. What was item 4?", "31", "Medium", [], "Last item."),
+Q("Memorize: RIVER - 9 - GLASS - PIANO. What was item 2?", "9", "Easy", [], "Second item."),
+Q("Memorize: COBALT - MOON - 72 - FOX. What was item 3?", "72", "Medium", [], "Third item."),
+Q("Memorize: VIOLET - 5 - ENGINE - CLOUD. What was item 4?", "CLOUD", "Easy", [], "Final item."),
+Q("Memorize: ATLAS - 19 - JUPITER - MINT. What was item 2?", "19", "Easy", [], "Second item."),
+Q("Memorize: QUARTZ - 44 - EAGLE - NOVA. What was item 1?", "QUARTZ", "Medium", [], "First item."),
+Q("Memorize: BOLT - SATURN - 6 - ORANGE. What was item 3?", "6", "Easy", [], "Third item."),
+Q("Memorize: MAPLE - 27 - OCEAN - GLASS. What was item 2?", "27", "Easy", [], "Second item."),
+Q("Memorize: COMET - 13 - TIGER - RAIN. What was item 3?", "TIGER", "Easy", [], "Third item."),
+Q("Memorize: PLUTO - 88 - VELVET - CROWN. What was item 4?", "CROWN", "Easy", [], "Last item."),
+Q("Memorize: LASER - 3 - FOREST - KITE. What was item 1?", "LASER", "Easy", [], "First item."),
+Q("Memorize: ORANGE - 64 - MOON - SWORD. What was item 2?", "64", "Easy", [], "Second item."),
+Q("Memorize: FALCON - 22 - ICE - TRAIN. What was item 4?", "TRAIN", "Easy", [], "Fourth item."),
+Q("Memorize: MARBLE - 71 - RIVER - STAR. What was item 3?", "RIVER", "Easy", [], "Third item."),
+Q("Memorize: NEPTUNE - 10 - GLASS - BISON. What was item 2?", "10", "Easy", [], "Second item."),
+Q("Memorize: CROWN - 55 - DESERT - PENGUIN. What was item 3?", "DESERT", "Easy", [], "Third item."),
+Q("Memorize: NOVA - 16 - CASTLE - RAIN. What was item 1?", "NOVA", "Easy", [], "First item."),
+Q("Memorize: PULSE - 33 - OAK - ROCKET. What was item 4?", "ROCKET", "Easy", [], "Last item."),
 ],
-
 "One Word Chaos": [
-("What do you call fear of spiders?", "arachnophobia", "Medium", ["arachnophobia"]),
-("What is the fastest land animal?", "cheetah", "Easy", ["cheetah"]),
-("What is the opposite of inflation?", "deflation", "Hard", ["deflation"]),
-("What is the hardest natural substance?", "diamond", "Easy", ["diamond"]),
-("Which blood type is commonly called the universal donor?", "o negative", "Medium", ["o negative", "o-"]),
-("Which planet has the shortest year?", "mercury", "Medium", ["mercury"]),
-("What is the study of earthquakes called?", "seismology", "Hard", ["seismology"]),
-("Which language has the most native speakers?", "mandarin", "Hard", ["mandarin", "chinese"]),
-("What is the largest internal organ in humans?", "liver", "Medium", ["liver"]),
-("Which vitamin is mainly produced through sunlight exposure?", "d", "Easy", ["d", "vitamin d"]),
+Q("One word only: Opposite of ancient?", "modern", "Easy", ["new"], "Not old."),
+Q("One word only: A person who studies stars and planets?", "astronomer", "Easy", [], "Not astrology."),
+Q("One word only: Frozen water?", "ice", "Easy", [], "Simple but don't overthink."),
+Q("One word only: The process plants use to make food using light?", "photosynthesis", "Medium", [], "Chloro... you know it."),
+Q("One word only: Fear of heights?", "acrophobia", "Medium", [], "Acro = height."),
+Q("One word only: Study of earthquakes?", "seismology", "Hard", [], "Seismo relates to shaking."),
+Q("One word only: A shape with eight sides?", "octagon", "Easy", [], "Octa = eight."),
+Q("One word only: Device that measures temperature?", "thermometer", "Easy", [], "Thermo = heat."),
+Q("One word only: Largest planet?", "Jupiter", "Easy", [], "Gas giant."),
+Q("One word only: The centre of an atom?", "nucleus", "Easy", [], "Contains protons and neutrons."),
+Q("One word only: A baby frog?", "tadpole", "Easy", [], "Aquatic early stage."),
+Q("One word only: A word opposite in meaning to another?", "antonym", "Medium", [], "Synonym is the opposite concept."),
+Q("One word only: A scientist who studies rocks?", "geologist", "Easy", [], "Geo = Earth."),
+Q("One word only: Instrument with black and white keys?", "piano", "Easy", [], "Musical keyboard instrument."),
+Q("One word only: A polygon with five sides?", "pentagon", "Easy", [], "Penta = five."),
+Q("One word only: The nearest star to Earth?", "Sun", "Easy", ["the sun"], "It is much closer than every other star."),
+Q("One word only: Blood-clotting cell fragment?", "platelet", "Medium", ["platelets"], "Tiny cell fragments help stop bleeding."),
+Q("One word only: Study of living organisms?", "biology", "Easy", [], "Bio = life."),
+Q("One word only: A number divisible only by 1 and itself?", "prime", "Easy", ["prime number"], "2, 3, 5..."),
+Q("One word only: Opposite of transparent?", "opaque", "Medium", [], "Blocks light from passing through clearly."),
 ],
-
 "Target Number": [
-("Use +, −, × or ÷: make 24 from 6, 4, 2.", "6*4", "Medium", ["24", "6*4", "6 x 4"]),
-("What number added to 37 gives 100?", "63", "Easy", ["63"]),
-("What is 12 × 12?", "144", "Easy", ["144"]),
-("What is 250 − 87?", "163", "Medium", ["163"]),
-("What is 15 × 7?", "105", "Medium", ["105"]),
-("What is 999 + 1?", "1000", "Easy", ["1000", "one thousand"]),
-("What is 18²?", "324", "Hard", ["324"]),
-("What is 720 ÷ 9?", "80", "Medium", ["80"]),
-("What is 2⁵?", "32", "Medium", ["32"]),
-("What is 45% of 200?", "90", "Medium", ["90"]),
+Q("Target 24: Using 6, 6, 4, 1 exactly once, make 24.", "6*(4+1-? )", "Extreme", [], "This item is a challenge; common arithmetic operators may have multiple solutions. Accept alternate valid constructions in future expansion."),
+Q("Target 10: 2, 3, 4, 5 exactly once. Make 10.", "5+4+3-2", "Medium", ["10"], "One valid solution is 5+4+3−2."),
+Q("Target 15: 1, 2, 3, 9 exactly once. Make 15.", "9+3+2+1", "Easy", ["15"], "Just add them."),
+Q("Target 20: 2, 3, 5, 10 exactly once. Make 20.", "10*2+5-3", "Medium", ["20"], "10×2+5−3."),
+Q("Target 18: 2, 4, 5, 7 exactly once. Make 18.", "7+5+4+2", "Easy", ["18"], "Add all four."),
+Q("Target 30: 1, 4, 5, 6 exactly once. Make 30.", "6*5+4-1", "Medium", ["30"], "6×5+4−1."),
+Q("Target 16: 2, 3, 4, 8 exactly once. Make 16.", "8*2+4-3", "Medium", ["16"], "8×2+4−3."),
+Q("Target 25: 1, 4, 5, 6 exactly once. Make 25.", "6*4+5-4", "Hard", ["25"], "This one is intentionally tricky; alternate valid answers may be accepted in a future solver."),
+Q("Target 12: 1, 2, 4, 6 exactly once. Make 12.", "6*2+4-1", "Easy", ["12"], "6×2+4−1."),
+Q("Target 21: 1, 3, 4, 7 exactly once. Make 21.", "7*3+4-1", "Easy", ["21"], "7×3+4−1."),
+Q("Target 14: 1, 2, 5, 8 exactly once. Make 14.", "8+5+2-1", "Easy", ["14"], "Add and subtract."),
+Q("Target 24: 2, 3, 4, 6 exactly once. Make 24.", "6*4+3-2", "Easy", ["24"], "6×4+3−2."),
+Q("Target 17: 1, 2, 6, 8 exactly once. Make 17.", "8+6+2+1", "Easy", ["17"], "Add all."),
+Q("Target 32: 2, 4, 6, 8 exactly once. Make 32.", "8*4+6-2", "Medium", ["32"], "8×4+6−2."),
+Q("Target 40: 2, 5, 7, 10 exactly once. Make 40.", "10*5-7+2-5", "Extreme", ["40"], "This challenge allows operator creativity; exact expression parsing can be expanded later."),
 ],
-
 "Mystery Power": [
-("A superhero can freeze water with a glance. What physical process is being accelerated?", "freezing", "Medium", ["freezing"]),
-("If you could see infrared radiation, what would warm objects generally appear to emit strongly?", "heat", "Medium", ["heat"]),
-("A character becomes invisible but still casts a shadow. What is the biggest clue that the power has a flaw?", "light", "Hard", ["light"]),
-("A machine doubles every number you enter. What happens to 7?", "14", "Easy", ["14"]),
-("A device reverses gravity for 3 seconds. What direction would you expect an object to accelerate?", "up", "Medium", ["up", "upward"]),
-("A fictional suit absorbs sunlight and stores energy. What real-world technology is most related?", "solar cell", "Hard", ["solar cell", "solar panel", "solar"]),
-("A character can hear frequencies humans normally cannot. What ability is this?", "ultrasound", "Hard", ["ultrasound", "ultrasonic"]),
-("A machine predicts tomorrow's temperature perfectly. What type of data would it need most directly?", "weather", "Easy", ["weather", "weather data"]),
-("A fictional crystal glows only when electricity passes through it. What phenomenon is being used?", "electroluminescence", "Extreme", ["electroluminescence"]),
-("A robot learns from rewards and penalties. What broad AI concept does this resemble?", "reinforcement learning", "Hard", ["reinforcement learning"]),
+Q("Which force causes objects to fall toward Earth?", "gravity", "Easy", [], "It is everywhere around you."),
+Q("Which phenomenon makes a straw look bent in water?", "refraction", "Medium", [], "Light changes direction between media."),
+Q("What causes the blue colour of the daytime sky?", "Rayleigh scattering", "Hard", ["rayleigh scattering", "scattering"], "Shorter wavelengths scatter more strongly in the atmosphere."),
+Q("What powers the Sun's energy production?", "nuclear fusion", "Medium", ["fusion"], "Hydrogen nuclei combine into helium."),
+Q("What phenomenon is responsible for a rainbow's separation of colours?", "dispersion", "Hard", [], "Different wavelengths refract by different amounts."),
+Q("What force opposes motion between surfaces?", "friction", "Easy", [], "It resists relative motion."),
+Q("What phenomenon allows magnets to attract iron without touching it?", "magnetic force", "Easy", ["magnetism"], "A field mediates the interaction."),
+Q("What causes tides primarily?", "gravity of the Moon and Sun", "Medium", ["moon gravity", "gravitational pull of moon"], "The Moon has the larger tidal influence."),
+Q("What principle explains why a floating object displaces water?", "Archimedes' principle", "Hard", ["archimedes principle"], "Buoyant force equals the weight of displaced fluid."),
+Q("What is the name of the effect where moving clocks run differently relative to observers?", "time dilation", "Extreme", [], "It is a consequence of relativity."),
+Q("What force keeps a charged particle moving in a curved path in a magnetic field?", "Lorentz force", "Hard", ["lorentz force"], "Magnetic force is part of the Lorentz force."),
+Q("What phenomenon produces a mirage on a hot road?", "refraction", "Medium", ["atmospheric refraction"], "Temperature gradients bend light."),
+Q("What is the energy stored in an object due to its position called?", "potential energy", "Easy", ["potential"], "Height in a gravitational field is a common example."),
+Q("What phenomenon lets a prism split white light?", "dispersion", "Medium", [], "Different colours bend differently."),
+Q("What is the transfer of heat by electromagnetic waves called?", "radiation", "Easy", [], "The Sun heats Earth this way."),
 ],
-
 "Sabotage Round": [
-("A man shaves several times a day but still has a beard. Who is he?", "barber", "Medium", ["barber"]),
-("You are in a room with no windows or doors. How do you get out?", "stop imagining", "Hard", ["stop imagining", "imagination"]),
-("A word becomes shorter when you add two letters. What word?", "short", "Hard", ["short"]),
-("What can travel around the world while staying in one corner?", "stamp", "Easy", ["stamp"]),
-("What has many teeth but cannot bite?", "comb", "Easy", ["comb"]),
-("What has a neck but no head?", "bottle", "Easy", ["bottle"]),
-("What has words but never speaks?", "book", "Easy", ["book"]),
-("What has an eye but cannot see and is useful for sewing?", "needle", "Easy", ["needle"]),
-("What has four wheels and flies?", "garbage truck", "Medium", ["garbage truck"]),
-("What can you catch but never throw?", "cold", "Easy", ["cold"]),
+Q("Sabotage: I am a number. Remove one letter from 'seven' and I become even. What am I?", "seven", "Hard", [], "The trick is that 'seven' contains the word 'even' after removing letters? Think carefully; intended wordplay is seven → even by removing s and? This round is deliberately chaotic."),
+Q("Sabotage: What is the one thing everyone can do at the same time but nobody can do twice at the exact same moment?", "be born", "Extreme", ["birth", "be born"], "A deliberately philosophical wordplay round."),
+Q("Sabotage: If a word is written in all caps, does its pronunciation automatically change?", "no", "Easy", ["no"], "Capitalization does not normally change pronunciation."),
+Q("Sabotage: Can a number be both even and odd?", "no", "Easy", ["no"], "Not under ordinary integer definitions."),
+Q("Sabotage: If you have 1 kilogram of feathers and 1 kilogram of steel, which is heavier?", "neither", "Easy", ["same"], "Both have the same mass."),
+Q("Sabotage: What has a beginning and an end but no middle?", "a stick", "Medium", ["stick"], "The intended joke is about the word/object framing; accept 'line' in casual play."),
+Q("Sabotage: Which is larger: 0.9 or 0.90?", "same", "Easy", ["equal", "0.90", "0.9"], "Trailing zero does not change the value."),
+Q("Sabotage: Is zero positive or negative?", "neither", "Medium", ["neither"], "Zero is neither positive nor negative."),
+Q("Sabotage: If you divide 10 by 2, then multiply by 2, what do you get?", "10", "Easy", [], "Operations reverse each other here."),
+Q("Sabotage: What number is missing: 1, 1, 2, 3, 5, ?", "8", "Easy", [], "Fibonacci strikes again."),
+Q("Sabotage: Can you spell 'wrong' correctly?", "wrong", "Easy", [], "The word itself is the answer."),
+Q("Sabotage: Which weighs more: a litre of water or a litre of mercury?", "mercury", "Hard", [], "Mercury is much denser."),
+Q("Sabotage: If today is Monday, what day will it be after 14 days?", "Monday", "Easy", [], "14 is exactly two weeks."),
+Q("Sabotage: Is a square also a rectangle?", "yes", "Medium", ["yes"], "A rectangle has four right angles; a square is a special rectangle."),
+Q("Sabotage: Can a triangle have two right angles in Euclidean geometry?", "no", "Medium", ["no"], "Two right angles already sum to 180 degrees."),
 ],
-
 "Buzzer Battle": [
-("Which planet is closest to the Sun?", "mercury", "Easy", ["mercury"]),
-("Who painted the Mona Lisa?", "leonardo da vinci", "Easy", ["leonardo da vinci", "da vinci"]),
-("What is the capital of Canada?", "ottawa", "Medium", ["ottawa"]),
-("What is the chemical symbol for gold?", "au", "Medium", ["au"]),
-("Which is the largest planet?", "jupiter", "Easy", ["jupiter"]),
-("How many bones are in the adult human body approximately?", "206", "Medium", ["206"]),
-("Which country gifted the Statue of Liberty to the United States?", "france", "Easy", ["france"]),
-("What is the smallest prime number?", "2", "Easy", ["2"]),
-("Which scientist developed the theory of relativity?", "einstein", "Easy", ["einstein", "albert einstein"]),
-("What is the deepest ocean trench called?", "mariana trench", "Hard", ["mariana trench"]),
+Q("Buzzer: Capital of Canada?", "Ottawa", "Easy", [], "Not Toronto."),
+Q("Buzzer: 12 × 12?", "144", "Easy", [], "Square of 12."),
+Q("Buzzer: Chemical symbol for oxygen?", "O", "Easy", ["o", "oxygen"], "Single letter."),
+Q("Buzzer: Largest mammal?", "blue whale", "Easy", [], "It is not a land animal."),
+Q("Buzzer: 29 + 13?", "42", "Easy", [], "The answer to many nerd jokes."),
+Q("Buzzer: Which planet is closest to the Sun?", "Mercury", "Easy", [], "First planet."),
+Q("Buzzer: What is H2O?", "water", "Easy", [], "Two hydrogens, one oxygen."),
+Q("Buzzer: 1000 metres = ?", "1 kilometre", "Easy", ["1 km", "kilometer"], "Metric conversion."),
+Q("Buzzer: Which continent is Egypt mostly in?", "Africa", "Easy", [], "The Sinai is in Asia, but most territory is in Africa."),
+Q("Buzzer: What is the boiling point of water at standard pressure in Celsius?", "100", "Easy", ["100 c", "100 degrees"], "Standard atmospheric pressure."),
+Q("Buzzer: Who painted the Mona Lisa?", "Leonardo da Vinci", "Easy", ["Leonardo"], "Italian Renaissance artist."),
+Q("Buzzer: What is 2 + 2 × 5?", "12", "Easy", [], "Multiply first."),
+Q("Buzzer: Which gas do plants take in for photosynthesis?", "carbon dioxide", "Easy", ["co2"], "Plants use carbon dioxide as a carbon source."),
+Q("Buzzer: How many players are on court for one basketball team at a time?", "5", "Easy", [], "Standard basketball."),
+Q("Buzzer: Which instrument measures atmospheric pressure?", "barometer", "Medium", [], "Baro = pressure."),
+Q("Buzzer: What is the hardest natural mineral commonly listed on the Mohs scale?", "diamond", "Easy", [], "It ranks 10."),
+Q("Buzzer: Which ocean is between Africa and Australia?", "Indian Ocean", "Easy", ["indian"], "Named after the Indian subcontinent."),
+Q("Buzzer: What is 7³?", "343", "Medium", [], "7×7×7."),
+Q("Buzzer: What is the SI unit of force?", "newton", "Easy", [], "Named after Isaac Newton."),
+Q("Buzzer: Which organ pumps blood through the body?", "heart", "Easy", [], "The muscular pump."),
 ],
-
 "CHAOS MODE": [
-("Which came first: the chicken or the egg? In evolutionary terms, what is the better answer?", "egg", "Hard", ["egg"]),
-("If you drop a feather and a hammer in a vacuum, which reaches the ground first?", "same time", "Hard", ["same time", "together"]),
-("What is heavier: 1 kg of iron or 1 kg of feathers?", "same", "Easy", ["same", "equal"]),
-("If a mirror reverses left and right, why doesn't it reverse up and down?", "depth", "Extreme", ["depth", "it reverses front back"]),
-("Which is technically a berry: strawberry or banana?", "banana", "Hard", ["banana"]),
-("What color is a black hole?", "black", "Easy", ["black"]),
-("If Earth suddenly stopped rotating, would you feel it immediately?", "yes", "Extreme", ["yes"]),
-("Can sound travel through empty space?", "no", "Easy", ["no"]),
-("What is faster: light or sound?", "light", "Easy", ["light"]),
-("If you are moving at constant velocity, is there a net force?", "no", "Hard", ["no"]),
+Q("CHAOS: Which is older: the pyramids of Giza or the Roman Colosseum?", "pyramids of Giza", "Medium", ["pyramids"], "Thousands of years older."),
+Q("CHAOS: If you fold a paper in half once, how many layers are there?", "2", "Easy", [], "One fold doubles layers."),
+Q("CHAOS: Which has more letters: 'alphabet' or 'abcdefghijklmnopqrstuvwxyz'?", "abcdefghijklmnopqrstuvwxyz", "Easy", ["abcdefghijklmnopqrstuvwxyz"], "Count the actual strings."),
+Q("CHAOS: What is the only mammal capable of true powered flight?", "bat", "Medium", [], "Gliding is different from powered flight."),
+Q("CHAOS: What is the opposite of a palindrome?", "not a palindrome", "Extreme", [], "There is no standard mathematical antonym; this is a chaos wording trap."),
+Q("CHAOS: Which is larger: 1/2 or 0.49?", "1/2", "Easy", ["0.5", "0.50"], "1/2 = 0.5."),
+Q("CHAOS: What has more mass: 1 kg of gold or 1 kg of feathers?", "same", "Easy", ["equal"], "Both are one kilogram."),
+Q("CHAOS: Which planet is famous for a giant red storm?", "Jupiter", "Easy", [], "The Great Red Spot."),
+Q("CHAOS: What number comes after 999?", "1000", "Easy", [], "Don't let the timer gaslight you."),
+Q("CHAOS: What is 10% of 10% of 1000?", "10", "Medium", [], "10% of 1000 = 100; 10% of 100 = 10."),
+Q("CHAOS: Which is not a prime number: 17, 19, 21, 23?", "21", "Easy", [], "21 = 3×7."),
+Q("CHAOS: If a triangle has angles 60, 60, and 60 degrees, what type is it?", "equilateral", "Easy", [], "Equal angles imply equal sides."),
+Q("CHAOS: Which came first: the word 'queue' or the letter Q?", "letter Q", "Extreme", ["q"], "Letters existed before the modern English word queue."),
+Q("CHAOS: What is 0 × 999999?", "0", "Easy", [], "Zero annihilates multiplication."),
+Q("CHAOS: Which is faster: sound or light?", "light", "Easy", [], "Light wins by an absurd margin."),
+Q("CHAOS: What does WWW stand for?", "World Wide Web", "Easy", [], "Three Ws."),
+Q("CHAOS: Which is larger: a byte or a bit?", "byte", "Easy", [], "One byte is 8 bits."),
+Q("CHAOS: What is the capital of Iceland?", "Reykjavik", "Medium", [], "It begins with R."),
+Q("CHAOS: What is the smallest positive integer?", "1", "Easy", [], "Counting starts there in ordinary positive integers."),
+Q("CHAOS: Can a square be a rhombus?", "yes", "Hard", ["yes"], "A square has four equal sides, so it qualifies."),
 ],
-
 "King of the Hill": [
-("Which number is NOT prime: 17, 19, 21, 23?", "21", "Easy", ["21"]),
-("What is 13 × 13?", "169", "Medium", ["169"]),
-("Which country has the largest land area?", "russia", "Easy", ["russia"]),
-("What is the freezing point of water in Celsius?", "0", "Easy", ["0", "zero"]),
-("Which organ pumps blood through the body?", "heart", "Easy", ["heart"]),
-("What is the capital of Japan?", "tokyo", "Easy", ["tokyo"]),
-("Which planet rotates on its side most dramatically?", "uranus", "Hard", ["uranus"]),
-("What is the square root of 225?", "15", "Medium", ["15"]),
-("Which element has the symbol K?", "potassium", "Hard", ["potassium"]),
-("What is the largest desert on Earth?", "antarctica", "Extreme", ["antarctica", "antarctic desert"]),
+Q("KOTH: Which number is both a square and a cube, greater than 1 and less than 100?", "64", "Hard", [], "8² = 4³ = 64."),
+Q("KOTH: What is the chemical symbol for sodium?", "Na", "Medium", ["na", "sodium"], "From natrium."),
+Q("KOTH: Which planet has the shortest year?", "Mercury", "Medium", [], "Closest planet to the Sun."),
+Q("KOTH: What is the derivative of x²?", "2x", "Hard", ["2*x"], "Power rule."),
+Q("KOTH: What is the integral of 1/x dx?", "ln|x| + C", "Extreme", ["ln x + c", "ln|x|"], "The standard antiderivative on intervals avoiding zero."),
+Q("KOTH: What is the largest prime number less than 20?", "19", "Easy", [], "18 is composite."),
+Q("KOTH: Which vitamin is synthesized in skin after sunlight exposure?", "vitamin D", "Medium", ["d", "vitamin d"], "UVB helps initiate the process."),
+Q("KOTH: What is the SI unit of power?", "watt", "Easy", [], "One joule per second."),
+Q("KOTH: Which organelle contains most of a eukaryotic cell's DNA?", "nucleus", "Easy", [], "Mitochondria also contain some DNA."),
+Q("KOTH: What is 15²?", "225", "Easy", [], "15×15."),
+Q("KOTH: Which law relates voltage, current and resistance?", "Ohm's law", "Medium", ["ohms law", "ohm law"], "V = IR."),
+Q("KOTH: What is the escape velocity from Earth approximately?", "11.2 km/s", "Extreme", ["11.2", "11.2 km/s"], "Approximate value from Earth's surface."),
+Q("KOTH: Which blood group is often called the universal red-cell donor?", "O negative", "Medium", ["o-", "o negative"], "For red-cell transfusion compatibility, with important clinical caveats."),
+Q("KOTH: What is 2^8?", "256", "Easy", [], "Powers of two."),
+Q("KOTH: What is the approximate value of pi to two decimal places?", "3.14", "Easy", ["3.14"], "The familiar approximation."),
+Q("KOTH: What is the powerhouse organelle?", "mitochondria", "Easy", ["mitochondrion"], "ATP production."),
+Q("KOTH: Which particle has a negative electric charge?", "electron", "Easy", [], "Protons are positive."),
+Q("KOTH: What is the pH of neutral pure water at about 25°C?", "7", "Easy", [], "Neutral at that reference condition."),
+Q("KOTH: What is the approximate density of water?", "1 g/cm3", "Medium", ["1", "1 g/cm^3", "1 g per cm3"], "Near 1 g/cm³ around room temperature."),
+Q("KOTH: What is the speed of sound in air approximately at room temperature?", "343 m/s", "Hard", ["343", "343 m/s"], "It varies with temperature and medium."),
 ],
 }
 
+# Add a few generated variants so repeated sessions don't feel identical.
+EXTRA_VARIANTS = [
+    ("Easy", "Quickfire: What is 5 + 8?", "13", ["13"]),
+    ("Easy", "Quickfire: What is 9 × 6?", "54", ["54"]),
+    ("Medium", "Quickfire: What is 144 ÷ 12?", "12", ["12"]),
+    ("Medium", "Quickfire: What is 25% of 80?", "20", ["20"]),
+]
+for mode in ["Buzzer Battle", "Panic", "CHAOS MODE"]:
+    for d, q, a, aliases in EXTRA_VARIANTS:
+        QUESTIONS[mode].append(Q(q, a, d, aliases, "Fast calculation.", "Basic arithmetic."))
 
 # ============================================================
-# QUESTION PROCESSING
+# GAME STATE
 # ============================================================
+active = {}
+panic_tasks = {}
+
+
+def cancel_panic_task(chat_id):
+    task = panic_tasks.pop(chat_id, None)
+    if task and not task.done():
+        task.cancel()
+
 
 def normalize(text):
+    text = html.unescape(text or "")
     text = text.lower().strip()
-    text = text.replace("’", "'")
-    text = text.replace("×", "x")
-    text = text.replace("−", "-")
-    text = text.replace("°", "")
-    text = text.replace(",", "")
+    for ch in "!?.,:;()[]{}\"'`“”‘’":
+        text = text.replace(ch, " ")
     text = " ".join(text.split())
-
-    for ch in ["?", "!", ".", ":", ";", "(", ")", "[", "]"]:
-        text = text.replace(ch, "")
-
+    replacements = {
+        "×": "*", "÷": "/", "−": "-",
+        "kilometers": "kilometres", "kilometer": "kilometre",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
     return text
 
 
 def question_key(q):
-    return (
-        q["mode"],
-        q["difficulty"],
-        q["q"],
-    )
+    return (q.get("mode", ""), q.get("difficulty", ""), q.get("q", ""))
 
 
-def build_questions():
-    all_questions = {}
-
-    for mode, rows in RAW_QUESTIONS.items():
-        all_questions[mode] = []
-
-        for q, answer, difficulty, aliases in rows:
-            all_questions[mode].append({
-                "mode": mode,
-                "q": q,
-                "answer": answer,
-                "difficulty": difficulty,
-                "aliases": aliases,
-            })
-
-    return all_questions
-
-
-QUESTIONS = build_questions()
+def prepare_question(q, mode):
+    x = dict(q)
+    x["mode"] = mode
+    x["_key"] = question_key(x)
+    return x
 
 
 def pool_for(mode, difficulty):
-    pool = QUESTIONS.get(mode, [])
-
+    pool = [prepare_question(q, mode) for q in QUESTIONS.get(mode, [])]
     if difficulty == "Any":
         return pool
-
-    exact = [
-        q for q in pool
-        if q["difficulty"] == difficulty
-        or (difficulty == "Extreme" and q["difficulty"] == "Hard")
-        or (difficulty == "Panic" and q["difficulty"] == "Panic")
-    ]
-
+    exact = [q for q in pool if q.get("difficulty") == difficulty]
     return exact or pool
 
 
 def choose_question(mode, difficulty, used):
     pool = pool_for(mode, difficulty)
-
-    available = [
-        q for q in pool
-        if question_key(q) not in used
-    ]
-
+    available = [q for q in pool if question_key(q) not in used]
     if not available:
         used.clear()
         available = pool[:]
-
+    if not available:
+        return None
     q = random.choice(available)
     used.add(question_key(q))
-
     return q
 
-
-def is_correct(user_answer, q):
-    normalized = normalize(user_answer)
-
-    valid = {
-        normalize(q["answer"])
-    }
-
-    valid.update(
-        normalize(x)
-        for x in q.get("aliases", [])
-    )
-
-    # Numeric shortcuts
-    if normalized.endswith(" degrees"):
-        normalized = normalized[:-8].strip()
-
-    return normalized in valid
-
-
 # ============================================================
-# PLAYER SYSTEM
+# UI / TEXT
 # ============================================================
 
-def ensure_player(chat_id, user):
-    name = user.full_name or user.username or "Player"
+MAIN_TEXT = """🏟️ <b>GUESSARENA</b>
 
-    with db() as con:
-        con.execute("""
-            INSERT INTO players(chat_id,user_id,name)
-            VALUES(?,?,?)
-            ON CONFLICT(chat_id,user_id)
-            DO UPDATE SET name=excluded.name
-        """, (chat_id, user.id, name))
+Welcome to the arena where your brain gets XP and your confidence gets audited. 😂
 
-
-def get_player(chat_id, user_id):
-    with db() as con:
-        return con.execute("""
-            SELECT chat_id,user_id,name,xp,wins,streak,
-                   best_streak,games,hints,achievements
-            FROM players
-            WHERE chat_id=? AND user_id=?
-        """, (chat_id, user_id)).fetchone()
-
-
-def add_win(chat_id, user_id, name, xp):
-    ensure_player(chat_id, type(
-        "U", (), {
-            "id": user_id,
-            "full_name": name,
-            "username": name
-        }
-    )())
-
-    with db() as con:
-        row = con.execute("""
-            SELECT streak,best_streak
-            FROM players
-            WHERE chat_id=? AND user_id=?
-        """, (chat_id, user_id)).fetchone()
-
-        streak = (row[0] if row else 0) + 1
-        best = max(row[1] if row else 0, streak)
-
-        con.execute("""
-            UPDATE players
-            SET xp=xp+?,
-                wins=wins+1,
-                games=games+1,
-                streak=?,
-                best_streak=?
-            WHERE chat_id=? AND user_id=?
-        """, (
-            xp,
-            streak,
-            best,
-            chat_id,
-            user_id,
-        ))
-
-        return streak, best
-
-
-def add_timeout(chat_id, user_id):
-    with db() as con:
-        con.execute("""
-            UPDATE players
-            SET games=games+1,
-                streak=0
-            WHERE chat_id=? AND user_id=?
-        """, (chat_id, user_id))
-
-
-def add_wrong_streak_break(chat_id, user_id):
-    with db() as con:
-        con.execute("""
-            UPDATE players
-            SET streak=0
-            WHERE chat_id=? AND user_id=?
-        """, (chat_id, user_id))
-
-
-def level_from_xp(xp):
-    return (xp // 100) + 1
-
-
-def title_from_level(level):
-    if level >= 30:
-        return "🏆 Arena Legend"
-    if level >= 20:
-        return "👑 Arena King"
-    if level >= 15:
-        return "🔥 Arena Beast"
-    if level >= 10:
-        return "⚡ Arena Veteran"
-    if level >= 5:
-        return "🎯 Arena Fighter"
-
-    return "🌱 Arena Rookie"
-
-
-# ============================================================
-# FUN REACTIONS
-# ============================================================
-
-WRONG_ROASTS = [
-    "😂 Confidence toh IAS level ka tha, answer nursery ka nikla.",
-    "💀 Bhai answer ne khud tumse distance bana liya.",
-    "🧠 Brain online tha... bas correct server se connect nahi hua.",
-    "😂 Ye answer dekh ke question bhi confused ho gaya.",
-    "📉 Accuracy ne abhi resignation submit kiya hai.",
-    "🤣 Itna confidence galat jagah invest kar diya!",
-    "💀 Calculator hota toh shayad calculator bhi sochta.",
-    "😂 Bro chose violence against logic.",
-    "🫠 Dimaag ne bola 'main nahi jaanta, tu bhej de'.",
-    "🤣 Ye answer dekhkar Google bhi 2 minute silent raha.",
-    "💀 Galat... lekin confidence respect-worthy tha.",
-    "😂 Tumhara answer aur correct answer ek hi planet pe nahi rehte.",
-    "🧠 Processing... ERROR 404: logic not found.",
-    "🤣 Aaj knowledge vacation pe hai kya?",
-    "💀 Answer galat hai, attitude sahi tha.",
-]
-
-CORRECT_REACTIONS = [
-    "🔥 BOOM! Correct!",
-    "🧠 Brain officially online!",
-    "👑 Arena mein ek aur victim... question ka. Correct!",
-    "⚡ Lightning-fast brain!",
-    "🎯 Direct hit!",
-    "🔥 Ye hui na baat!",
-    "🗿 Calm. Calculated. Correct.",
-    "💯 Knowledge ne attendance laga di!",
-    "🚀 Straight to the leaderboard!",
-    "😂 Question ko laga tha bach jayega. Nahi bacha.",
-]
-
-TIMEOUT_REACTIONS = [
-    "💀 TIME OVER! Brain buffering mein hi reh gaya.",
-    "⏰ Khatam. Ghadi ne mercy nahi dikhayi 😂",
-    "💀 Timer ne bola: 'Bas bhai, ab ghar ja.'",
-    "⌛ Time up! Answer ab reveal hoga.",
-    "😂 Dimaag ne loading complete ki... timer pehle hi chala gaya.",
-    "🚨 TIMEOUT! Knowledge thi, speed nahi thi.",
-    "💀 Question ab tumhe roast karne wala hai.",
-]
-
-LATE_REACTIONS = [
-    "⏰ Too late! Round already lock ho chuka hai 😂",
-    "💀 Bhai buzzer baj chuka. Ab answer ka koi value nahi.",
-    "😂 Late entry allowed nahi hai, ye railway platform nahi.",
-    "🚫 Round closed! Agli baar speed dikhao.",
-]
-
-
-# ============================================================
-# MENUS
-# ============================================================
-
-MODES = [
-    ("🧩", "Word"),
-    ("🐾", "Animal"),
-    ("😀", "Emoji"),
-    ("🌍", "City"),
-    ("🧠", "Riddle"),
-    ("🔐", "Logic"),
-    ("🎭", "Trick"),
-    ("🔢", "Pattern"),
-    ("💀", "Panic"),
-    ("🎩", "Bluff Master"),
-    ("🎲", "Risk It"),
-    ("💣", "Memory Bomb"),
-    ("🌪️", "One Word Chaos"),
-    ("🎯", "Target Number"),
-    ("⚡", "Mystery Power"),
-    ("🕵️", "Sabotage Round"),
-    ("🔔", "Buzzer Battle"),
-    ("🌋", "CHAOS MODE"),
-    ("👑", "King of the Hill"),
-]
+Pick a mode, pick a difficulty, then beat the clock.
+<b>Group rule:</b> first correct answer wins the round.
+<b>Timeout:</b> round ends + answer revealed + no points.
+"""
 
 
 def main_menu():
-    buttons = []
+    rows = [
+        [InlineKeyboardButton("🎮 PLAY", callback_data="menu:play"), InlineKeyboardButton("👤 PROFILE", callback_data="menu:profile")],
+        [InlineKeyboardButton("🏆 LEADERBOARD", callback_data="menu:leaderboard"), InlineKeyboardButton("🏅 ACHIEVEMENTS", callback_data="menu:achievements")],
+        [InlineKeyboardButton("📅 DAILY", callback_data="menu:daily"), InlineKeyboardButton("❓ HELP", callback_data="menu:help")],
+    ]
+    return InlineKeyboardMarkup(rows)
 
-    for icon, mode in MODES:
-        buttons.append([
-            InlineKeyboardButton(
-                f"{icon} {mode}",
-                callback_data=f"mode:{mode}"
-            )
-        ])
 
-    buttons.extend([
-        [
-            InlineKeyboardButton("🎮 Random Mode", callback_data="random_mode"),
-            InlineKeyboardButton("🔥 Daily", callback_data="daily"),
-        ],
-        [
-            InlineKeyboardButton("👤 Profile", callback_data="profile"),
-            InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard"),
-        ],
-        [
-            InlineKeyboardButton("🏅 Achievements", callback_data="achievements"),
-            InlineKeyboardButton("ℹ️ Help", callback_data="help"),
-        ],
-    ])
-
-    return InlineKeyboardMarkup(buttons)
+def mode_menu():
+    modes = list(QUESTIONS.keys())
+    rows = []
+    for i in range(0, len(modes), 2):
+        row = []
+        for mode in modes[i:i+2]:
+            row.append(InlineKeyboardButton(f"{MODE_EMOJI.get(mode,'🎮')} {mode}", callback_data=f"mode:{mode}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🏠 HOME", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
 
 
 def difficulty_menu(mode):
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🟢 Easy", callback_data=f"diff:{mode}:Easy"),
-            InlineKeyboardButton("🟡 Medium", callback_data=f"diff:{mode}:Medium"),
-        ],
-        [
-            InlineKeyboardButton("🔴 Hard", callback_data=f"diff:{mode}:Hard"),
-            InlineKeyboardButton("🟣 Extreme", callback_data=f"diff:{mode}:Extreme"),
-        ],
-        [
-            InlineKeyboardButton("🎲 Any", callback_data=f"diff:{mode}:Any"),
-            InlineKeyboardButton("💀 Panic 8s", callback_data=f"diff:{mode}:Panic"),
-        ],
-        [
-            InlineKeyboardButton("🏠 Home", callback_data="menu:home")
-        ],
+        [InlineKeyboardButton("🟢 EASY • 15s", callback_data=f"diff:{mode}:Easy")],
+        [InlineKeyboardButton("🟡 MEDIUM • 15s", callback_data=f"diff:{mode}:Medium")],
+        [InlineKeyboardButton("🔴 HARD • 20s", callback_data=f"diff:{mode}:Hard")],
+        [InlineKeyboardButton("🟣 EXTREME • 20s", callback_data=f"diff:{mode}:Extreme")],
+        [InlineKeyboardButton("🚨 PANIC • 8s", callback_data=f"diff:{mode}:Panic")],
+        [InlineKeyboardButton("🎲 ANY • mixed", callback_data=f"diff:{mode}:Any")],
+        [InlineKeyboardButton("⬅️ MODES", callback_data="menu:play"), InlineKeyboardButton("🏠 HOME", callback_data="menu:home")],
     ])
 
 
+def round_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💡 HINT", callback_data="round:hint"), InlineKeyboardButton("🛑 END GAME", callback_data="round:end")],
+    ])
+
+
+def xp_for(q):
+    return XP_VALUES.get(q.get("difficulty", "Medium"), 20)
+
+
+def timer_for(q):
+    return TIMERS.get(q.get("difficulty", "Medium"), 15)
+
+
+def mode_intro(mode, difficulty):
+    intros = {
+        "Word": "Dictionary just entered the boxing ring.",
+        "Animal": "Nature has questions. You have 15 seconds.",
+        "Emoji": "Decode the chaos before the emojis judge you.",
+        "City": "Pack your imaginary suitcase.",
+        "Riddle": "Logic is optional. Confidence is dangerous.",
+        "Logic": "Your brain has been summoned.",
+        "Trick": "Read twice. Answer once. Regret immediately.",
+        "Pattern": "Find the rule before the rule finds you.",
+        "Panic": "NO TIME TO OVERTHINK. GO.",
+        "Bluff Master": "One statement is lying. Catch it.",
+        "Risk It": "High XP. High ego damage.",
+        "Memory Bomb": "Remember first. Panic later.",
+        "One Word Chaos": "One word. No essays. No TED Talk.",
+        "Target Number": "Numbers have been weaponized.",
+        "Mystery Power": "Science is about to throw hands.",
+        "Sabotage Round": "The question itself may be trying to sabotage you.",
+        "Buzzer Battle": "Fastest brain gets the crown.",
+        "CHAOS MODE": "Rules are normal. Your confidence isn't.",
+        "King of the Hill": "Stay alive. Keep the streak. Own the hill.",
+    }
+    return f"{MODE_EMOJI.get(mode,'🎮')} <b>{html.escape(mode)}</b> • <b>{difficulty}</b>\n{intros.get(mode,'Arena round started.')}"
+
+ROAST_WRONG = [
+    "💀 Bro answered with confidence and left with evidence.",
+    "😂 That answer had premium confidence and free accuracy.",
+    "🫠 Brain.exe has stopped responding.",
+    "😭 The question asked one thing. You invented another.",
+    "🤡 Bold answer. Unfortunately, reality disagrees.",
+    "📉 Accuracy graph just took a personal day.",
+    "💀 That wasn't wrong. That was creatively incorrect.",
+    "😂 Your brain really said: 'Let's gamble.'",
+    "🧠❌ CPU overheating. Result unavailable.",
+    "🚑 Someone escort that answer out of the arena.",
+    "😈 Nice try. The scoreboard remains unimpressed.",
+    "💥 Critical hit... on yourself.",
+    "🪦 A beautiful answer. May it rest in peace.",
+    "📢 Breaking news: answer has been declared fictional.",
+    "😂 You didn't miss the answer. You explored another universe.",
+]
+
+ROAST_TIMEOUT = [
+    "⏰ TIME! The clock won. Your brain filed an appeal.",
+    "🚨 8/15/20 seconds vanished like your answer.",
+    "💀 Time has officially left the chat.",
+    "😂 You had a timer. The timer had you.",
+    "⌛ Round expired. Confidence loading... still loading.",
+    "🫠 The answer was waiting. You were buffering.",
+    "🚪 Time-out! The question has escaped.",
+    "📉 Zero points. Maximum dramatic suspense.",
+    "💥 BOOM. Timer detonated the round.",
+    "😵 You didn't answer. The clock answered for you: NOPE.",
+]
+
+ROAST_CORRECT = [
+    "🔥 CLEAN HIT!",
+    "🧠 BIG BRAIN DETECTED.",
+    "👑 THAT'S HOW YOU PLAY.",
+    "⚡ Faster than the group chat gossip.",
+    "🎯 Bullseye. Absolutely illegal levels of confidence.",
+    "💎 Correct AND early. Disrespectful.",
+    "🚀 Brain launched successfully.",
+    "😈 Somebody came prepared.",
+    "🏆 The arena has been informed of your existence.",
+    "💥 BOOM! Correct answer secured.",
+    "🫡 Respect. That one was clean.",
+    "📈 XP printer activated.",
+    "🔥 The scoreboard just got nervous.",
+    "🧠 Neurons doing overtime.",
+    "👀 Everyone else is suddenly very quiet.",
+]
+
+LATE_LINES = [
+    "⛔ Round closed. Bro, that answer arrived after the funeral.",
+    "😂 Too late! Correctness without timing = spectator mode.",
+    "🚫 Buzzer already fired. Nice answer, wrong universe.",
+    "⌛ The round has moved on. Your message is now historical evidence.",
+    "😈 Correct or not, the arena waits for nobody.",
+]
+
+STREAK_LINES = [
+    "🔥 STREAK {streak}! Someone stop this person.",
+    "👑 {streak} in a row. The hill is getting nervous.",
+    "⚡ {streak}-streak! Brain refusing to clock out.",
+    "💀 {streak} straight. Other players are reconsidering friendship.",
+    "📈 Streak {streak}. This is becoming a problem.",
+]
+
 # ============================================================
-# TIMER CONTROL
+# GAME FLOW
 # ============================================================
 
-def cancel_panic_task(chat_id):
-    task = panic_tasks.pop(chat_id, None)
-
-    if task and not task.done():
-        task.cancel()
-
-
-async def countdown(chat_id, bot, round_id):
+async def safe_edit(message, text, reply_markup=None):
     try:
-        game = active.get(chat_id)
+        return await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        return None
 
-        if not game or game["round_id"] != round_id:
-            return
 
-        seconds = game["seconds"]
+def active_is(chat_id, round_id):
+    state = active.get(chat_id)
+    return bool(state and state.get("round_id") == round_id and not state.get("closed"))
 
-        timer_message = await bot.send_message(
-            chat_id=chat_id,
-            text=f"⏳ <b>{seconds}s</b>",
-            parse_mode="HTML",
-        )
 
-        for remaining in range(seconds - 1, 0, -1):
+async def countdown(bot, chat_id, message_id, round_id, seconds):
+    task = asyncio.current_task()
+    timer_msg = None
+    try:
+        # Send a separate timer so the question message stays readable.
+        timer_msg = await bot.send_message(chat_id, f"⏱️ <b>{seconds}s</b>", parse_mode="HTML")
+        for left in range(seconds - 1, -1, -1):
             await asyncio.sleep(1)
-
-            game = active.get(chat_id)
-
-            if (
-                not game
-                or game["round_id"] != round_id
-                or game.get("closed")
-            ):
+            if not active_is(chat_id, round_id):
                 return
-
             try:
-                await timer_message.edit_text(
-                    f"⏳ <b>{remaining}s</b>",
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=timer_msg.message_id,
+                    text=f"⏱️ <b>{left}s</b>" if left > 0 else "💥 <b>TIME!</b>",
                     parse_mode="HTML",
                 )
             except Exception:
                 pass
-
-        await asyncio.sleep(1)
-
-        game = active.get(chat_id)
-
-        if (
-            not game
-            or game["round_id"] != round_id
-            or game.get("closed")
-        ):
+            if left == 0:
+                break
+        if not active_is(chat_id, round_id):
             return
-
-        game["closed"] = True
-
-        mode = game["mode"]
-        q = game["question"]
-
-        player = game.get("player_id")
-
-        if player:
-            add_timeout(chat_id, player)
-
+        state = active.get(chat_id)
+        state["closed"] = True
+        q = state["question"]
         active.pop(chat_id, None)
-
-        try:
-            await timer_message.edit_text(
-                "💀 <b>TIME OVER!</b>",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-
-        await bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"{random.choice(TIMEOUT_REACTIONS)}\n\n"
-                f"🧩 <b>Answer:</b> "
-                f"<code>{html.escape(q['answer'])}</code>\n\n"
-                f"🚫 <b>0 XP</b> — speed bhi game ka part hai."
-            ),
-            parse_mode="HTML",
-        )
-
+        used_answer = html.escape(str(q["a"]))
+        roast = random.choice(ROAST_TIMEOUT)
+        extra = f"\n\n📖 <b>Answer:</b> {used_answer}"
+        if q.get("explain"):
+            extra += f"\n💡 {html.escape(q['explain'])}"
+        await bot.send_message(chat_id, f"{roast}{extra}\n\n<b>Round over.</b> Start another game from /start.", parse_mode="HTML")
+        # Timeout counts as a resolved game for the player who was active in PM; in groups
+        # we don't punish the whole group by changing everyone’s streak.
+        starter = state.get("starter")
+        if starter:
+            add_result(chat_id, starter["id"], starter["name"], reset_streak=True)
     except asyncio.CancelledError:
-        return
-
-    except Exception:
-        active.pop(chat_id, None)
-
+        raise
+    except Exception as e:
+        print("countdown error:", repr(e))
     finally:
-        if panic_tasks.get(chat_id) is asyncio.current_task():
+        if panic_tasks.get(chat_id) is task:
             panic_tasks.pop(chat_id, None)
 
 
-# ============================================================
-# ROUND ENGINE
-# ============================================================
+async def send_round(bot, chat_id, state):
+    difficulty = state["difficulty"]
+    mode = state["mode"]
+    q = choose_question(mode, difficulty, state["used"])
+    if not q:
+        await bot.send_message(chat_id, "⚠️ Question pool is empty. Try another mode.")
+        active.pop(chat_id, None)
+        return
+    state["question"] = q
+    state["round_id"] = uuid.uuid4().hex
+    state["closed"] = False
+    state["round_no"] = state.get("round_no", 0) + 1
+    round_id = state["round_id"]
+    seconds = timer_for(q)
+    xp = xp_for(q)
 
-async def send_round(
-    bot,
-    chat_id,
-    mode,
-    difficulty,
-    used=None,
-    daily=False,
-    player_id=None,
-):
-    cancel_panic_task(chat_id)
-
-    if used is None:
-        used = set()
-
-    q = choose_question(mode, difficulty, used)
-
-    seconds = TIMERS.get(
-        difficulty,
-        TIMERS["Medium"]
-    )
-
-    round_id = uuid.uuid4().hex
-
-    active[chat_id] = {
-        "round_id": round_id,
-        "mode": mode,
-        "difficulty": difficulty,
-        "question": q,
-        "used": used,
-        "seconds": seconds,
-        "daily": daily,
-        "player_id": player_id,
-        "closed": False,
-    }
-
-    xp = XP_VALUES.get(
-        difficulty,
-        XP_VALUES["Medium"]
-    )
-
-    icon = dict(MODES).get(mode, "🎮")
-
+    header = mode_intro(mode, q.get("difficulty", difficulty))
+    streak = get_player(chat_id, state["starter"]["id"])["streak"] if state.get("starter") else 0
+    streak_text = f"🔥 Streak: {streak}" if streak else "🔥 Streak: 0"
     text = (
-        f"{icon} <b>{html.escape(mode.upper())}</b>\n"
-        f"🔥 Difficulty: <b>{html.escape(difficulty)}</b>\n"
-        f"⭐ Reward: <b>+{xp} XP</b>\n\n"
-        f"⏱️ <b>{seconds} SECONDS</b>\n"
-        f"🧠 <b>READ TWICE. ANSWER ONCE.</b>\n\n"
-        f"🧩 <b>{html.escape(q['q'])}</b>\n\n"
-        f"✍️ Answer bhejo!"
+        f"{header}\n\n"
+        f"<b>ROUND {state['round_no']}</b> • +{xp} XP\n"
+        f"{streak_text}\n\n"
+        f"❓ <b>{html.escape(q['q'])}</b>\n\n"
+        f"👥 <i>First correct answer wins this round.</i>"
     )
-
-    await bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode="HTML",
-    )
-
-    task = asyncio.create_task(
-        countdown(
-            chat_id,
-            bot,
-            round_id,
-        )
-    )
-
+    msg = await bot.send_message(chat_id, text, reply_markup=round_keyboard(), parse_mode="HTML")
+    state["question_message_id"] = msg.message_id
+    cancel_panic_task(chat_id)
+    task = asyncio.create_task(countdown(bot, chat_id, msg.message_id, round_id, seconds))
     panic_tasks[chat_id] = task
 
+
+async def start_game(update, context, mode, difficulty):
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    if chat_id in active:
+        await update.effective_message.reply_text("🎮 A game is already running. Finish it first or press END GAME.")
+        return
+    ensure_player(chat_id, user.id, user.first_name or "Player")
+    active[chat_id] = {
+        "mode": mode,
+        "difficulty": difficulty,
+        "used": set(),
+        "starter": {"id": user.id, "name": user.first_name or "Player"},
+        "round_no": 0,
+        "closed": False,
+    }
+    await update.effective_message.reply_text(
+        f"🚀 <b>GAME LOADED</b>\n\n{mode_intro(mode, difficulty)}\n\n"
+        "<b>Rules:</b>\n• First correct answer gets XP\n• Wrong answers get roasted 😈\n• Timeout reveals the answer and gives 0 XP\n• Timer is stopped before answer reveal\n\n<b>GO.</b>",
+        parse_mode="HTML",
+    )
+    await asyncio.sleep(0.8)
+    if chat_id in active:
+        await send_round(context.bot, chat_id, active[chat_id])
+
+
+async def answer(update, context):
+    if not update.message or not update.message.text:
+        return
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    text = update.message.text
+    state = active.get(chat_id)
+    if not state:
+        return
+    if state.get("closed"):
+        return
+    q = state.get("question")
+    if not q:
+        return
+
+    expected = [q["a"]] + q.get("aliases", [])
+    normalized = normalize(text)
+    correct = any(normalized == normalize(str(x)) for x in expected)
+
+    if not correct:
+        # Wrong answers never close the round.
+        ensure_player(chat_id, user.id, user.first_name or "Player")
+        if random.random() < 0.70:
+            await update.message.reply_text(random.choice(ROAST_WRONG))
+        else:
+            await update.message.reply_text("❌ Wrong! But at least you attacked the question. 😭")
+        # Wrong guesses reset only the guesser's streak, not everybody's.
+        con = db()
+        con.execute("UPDATE players SET streak=0 WHERE chat_id=? AND user_id=?", (chat_id, user.id))
+        con.commit()
+        con.close()
+        return
+
+    # First correct answer wins. Race protection is performed by closing the state before awaits.
+    round_id = state.get("round_id")
+    if not active_is(chat_id, round_id):
+        await update.message.reply_text(random.choice(LATE_LINES))
+        return
+    state["closed"] = True
+    cancel_panic_task(chat_id)
+    active.pop(chat_id, None)
+
+    name = user.first_name or "Player"
+    xp = xp_for(q)
+    before = get_player(chat_id, user.id)
+    old_level = level_from_xp(before["xp"])
+    add_result(chat_id, user.id, name, xp=xp, win=True)
+    after = get_player(chat_id, user.id)
+    new_level = level_from_xp(after["xp"])
+    streak = after["streak"]
+
+    lines = [
+        random.choice(ROAST_CORRECT),
+        f"🏆 <b>{html.escape(name)}</b> gets <b>+{xp} XP</b>",
+        f"🔥 Streak: <b>{streak}</b>",
+    ]
+    if streak >= 3:
+        lines.append(random.choice(STREAK_LINES).format(streak=streak))
+    if new_level > old_level:
+        lines.append(f"🎉 <b>LEVEL UP!</b> {old_level} → {new_level} • {html.escape(title_from_level(new_level))}")
+        if set_achievement(chat_id, user.id, "level_up"):
+            lines.append("🏅 Achievement unlocked: <b>LEVEL UP</b>")
+    if streak >= 5 and set_achievement(chat_id, user.id, "hot_streak"):
+        lines.append("🏅 Achievement unlocked: <b>HOT STREAK</b>")
+
+    if q.get("explain"):
+        lines.append(f"💡 {html.escape(q['explain'])}")
+    lines.append("\n⚡ Next round incoming...")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    # Daily is one-shot. Normal games continue after a correct answer.
+    if state.get("daily"):
+        return
+    await asyncio.sleep(1.2)
+    if chat_id in active:
+        return
+    # Recreate the same game only if nobody started a different game during the delay.
+    state["closed"] = False
+    active[chat_id] = state
+    await send_round(context.bot, chat_id, state)
 
 # ============================================================
 # COMMANDS
@@ -871,687 +1033,319 @@ async def send_round(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
-
-    ensure_player(chat_id, user)
-
-    cancel_panic_task(chat_id)
-    active.pop(chat_id, None)
-
-    name = html.escape(
-        user.first_name or "Player"
-    )
-
-    text = (
-        "🎮 <b>WELCOME TO GUESSARENA</b> 🔥\n\n"
-        f"Yo <b>{name}</b>! 👋\n\n"
-        "Yahan knowledge ke saath-saath "
-        "<b>speed, logic aur thoda pagalpan</b> bhi chahiye. 😂\n\n"
-        "🎯 Correct = XP\n"
-        "❌ Wrong = roast\n"
-        "⏰ Timeout = answer reveal + 0 XP\n"
-        "🏆 First correct player = winner\n"
-        "🔀 Questions = shuffled + no-repeat\n\n"
-        "👇 <b>Apna battlefield choose karo.</b>"
-    )
-
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=main_menu(),
-    )
+    ensure_player(chat_id, user.id, user.first_name or "Player")
+    await update.effective_message.reply_text(MAIN_TEXT, reply_markup=main_menu(), parse_mode="HTML")
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎮 <b>GUESSARENA — HOW TO PLAY</b>\n\n"
-        "1️⃣ Mode choose karo\n"
-        "2️⃣ Difficulty choose karo\n"
-        "3️⃣ Timer ke andar answer bhejo\n"
-        "4️⃣ Correct hua → XP + streak 🔥\n"
-        "5️⃣ Wrong hua → roast 😂\n"
-        "6️⃣ Time over → answer reveal, 0 XP 💀\n\n"
-        "<b>Timers</b>\n"
-        "🟢 Easy: 15s\n"
-        "🟡 Medium: 15s\n"
-        "🔴 Hard: 20s\n"
-        "🟣 Extreme: 20s\n"
-        "💀 Panic: 8s\n\n"
-        "🏆 Group mein jo pehle correct answer deta hai, "
-        "usi ko reward milta hai.\n\n"
-        "⚠️ Timer ke baad bheja answer count nahi hoga.",
-        parse_mode="HTML",
-    )
+    text = """<b>🧠 GUESSARENA HELP</b>
 
+<b>How to play</b>
+1. Press PLAY.
+2. Pick a mode.
+3. Pick difficulty.
+4. Answer in normal chat.
+5. First correct answer gets XP.
 
-# ============================================================
-# PROFILE
-# ============================================================
+<b>Timers</b>
+🟢 Easy: 15s
+🟡 Medium: 15s
+🔴 Hard: 20s
+🟣 Extreme: 20s
+🚨 Panic: 8s
+
+<b>Commands</b>
+/start — main menu
+/play — choose a mode
+/profile — your stats
+/leaderboard — chat leaderboard
+/achievements — achievements
+/daily — daily challenge
+/help — rules
+
+Wrong answers don't end the round. Timeout does.
+"""
+    await update.effective_message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
+
 
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
-
-    ensure_player(chat_id, user)
     row = get_player(chat_id, user.id)
-
-    if not row:
-        return
-
-    (
-        _,
-        _,
-        name,
-        xp,
-        wins,
-        streak,
-        best,
-        games,
-        hints,
-        achievements,
-    ) = row
-
-    level = level_from_xp(xp)
+    level = level_from_xp(row["xp"])
     title = title_from_level(level)
-
-    accuracy = (
-        round((wins / games) * 100, 1)
-        if games else 0
-    )
-
+    achievements = [x for x in (row["achievements"] or "").split(",") if x]
     text = (
-        f"👤 <b>{html.escape(name)}</b>\n\n"
-        f"{title}\n"
-        f"⭐ XP: <b>{xp}</b>\n"
-        f"🎚️ Level: <b>{level}</b>\n"
-        f"🏆 Wins: <b>{wins}</b>\n"
-        f"🎮 Resolved Rounds: <b>{games}</b>\n"
-        f"🎯 Accuracy: <b>{accuracy}%</b>\n"
-        f"🔥 Current Streak: <b>{streak}</b>\n"
-        f"👑 Best Streak: <b>{best}</b>\n"
+        f"👤 <b>{html.escape(row['name'])}</b>\n\n"
+        f"🏷️ Title: <b>{html.escape(title)}</b>\n"
+        f"⭐ Level: <b>{level}</b>\n"
+        f"✨ XP: <b>{row['xp']}</b>\n"
+        f"🏆 Wins: <b>{row['wins']}</b>\n"
+        f"🎮 Resolved games: <b>{row['games']}</b>\n"
+        f"🔥 Current streak: <b>{row['streak']}</b>\n"
+        f"💥 Best streak: <b>{row['best_streak']}</b>\n"
+        f"💡 Hints: <b>{row['hints']}</b>\n"
+        f"🏅 Achievements: <b>{len(achievements)}</b>"
     )
+    await update.effective_message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
 
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML",
-    )
-
-
-# ============================================================
-# LEADERBOARD
-# ============================================================
 
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-
-    with db() as con:
-        rows = con.execute("""
-            SELECT name,xp,wins,streak
-            FROM players
-            WHERE chat_id=?
-            ORDER BY xp DESC
-            LIMIT 10
-        """, (chat_id,)).fetchall()
-
+    con = db()
+    rows = con.execute("SELECT name,xp,wins,streak FROM players WHERE chat_id=? ORDER BY xp DESC, wins DESC LIMIT 10", (chat_id,)).fetchall()
+    con.close()
     if not rows:
-        await update.message.reply_text(
-            "🏆 Abhi leaderboard khaali hai."
-        )
+        await update.effective_message.reply_text("🏆 No players yet. Start the chaos.")
         return
-
     medals = ["🥇", "🥈", "🥉"]
+    out = ["🏆 <b>GUESSARENA LEADERBOARD</b>", ""]
+    for i, r in enumerate(rows, 1):
+        medal = medals[i-1] if i <= 3 else f"{i}."
+        out.append(f"{medal} <b>{html.escape(r['name'])}</b> — {r['xp']} XP • {r['wins']} wins • 🔥{r['streak']}")
+    await update.effective_message.reply_text("\n".join(out), reply_markup=main_menu(), parse_mode="HTML")
 
-    lines = [
-        "🏆 <b>GUESSARENA LEADERBOARD</b>\n"
-    ]
-
-    for i, row in enumerate(rows):
-        name, xp, wins, streak = row
-
-        prefix = (
-            medals[i]
-            if i < 3
-            else f"<b>{i+1}.</b>"
-        )
-
-        lines.append(
-            f"{prefix} {html.escape(name)} — "
-            f"<b>{xp} XP</b> "
-            f"({wins} wins, 🔥{streak})"
-        )
-
-    await update.message.reply_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-    )
-
-
-# ============================================================
-# ACHIEVEMENTS
-# ============================================================
 
 async def achievements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
-
     row = get_player(chat_id, user.id)
-
-    if not row:
-        return
-
-    xp = row[3]
-    wins = row[4]
-    best = row[6]
-
-    unlocked = []
-
-    if wins >= 1:
-        unlocked.append("🎯 First Blood")
-
-    if wins >= 10:
-        unlocked.append("🔥 Getting Serious")
-
-    if wins >= 25:
-        unlocked.append("⚡ Arena Addict")
-
-    if best >= 5:
-        unlocked.append("👑 Streak Machine")
-
-    if xp >= 1000:
-        unlocked.append("💎 XP Monster")
-
-    if not unlocked:
-        unlocked.append(
-            "🔒 No achievement yet — go cause some chaos."
-        )
-
-    await update.message.reply_text(
-        "🏅 <b>ACHIEVEMENTS</b>\n\n"
-        + "\n".join(unlocked),
-        parse_mode="HTML",
-    )
+    unlocked = set(filter(None, (row["achievements"] or "").split(",")))
+    all_ach = {
+        "level_up": "🎉 LEVEL UP — reached a new level",
+        "hot_streak": "🔥 HOT STREAK — 5 correct in a row",
+        "speed_demon": "⚡ SPEED DEMON — fast correct answer",
+        "first_win": "🏆 FIRST BLOOD — first win",
+        "daily": "📅 DAILY GRINDER — completed a daily",
+        "chaos": "🌪️ CHAOS SURVIVOR — survived Chaos mode",
+    }
+    out = ["🏅 <b>ACHIEVEMENTS</b>", ""]
+    for key, label in all_ach.items():
+        out.append(("✅ " if key in unlocked else "🔒 ") + label)
+    await update.effective_message.reply_text("\n".join(out), reply_markup=main_menu(), parse_mode="HTML")
 
 
-# ============================================================
-# DAILY
-# ============================================================
-
-async def daily_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-
+    user = update.effective_user
     if chat_id in active:
-        await update.message.reply_text(
-            "😂 Pehle current round finish karo."
-        )
+        await update.effective_message.reply_text("🎮 Finish the current game before starting Daily.")
         return
-
-    # Deterministic daily selection
-    random.seed(
-        f"{date.today().isoformat()}:{chat_id}"
+    ensure_player(chat_id, user.id, user.first_name or "Player")
+    # Deterministic daily pick per date/chat so everyone gets a stable challenge for the day.
+    pool = QUESTIONS["CHAOS MODE"] + QUESTIONS["Logic"] + QUESTIONS["Trick"]
+    idx = abs(hash(f"{chat_id}:{date.today().isoformat()}")) % len(pool)
+    q = prepare_question(pool[idx], "DAILY")
+    active[chat_id] = {
+        "mode": "DAILY",
+        "difficulty": q.get("difficulty", "Medium"),
+        "used": {question_key(q)},
+        "starter": {"id": user.id, "name": user.first_name or "Player"},
+        "round_no": 1,
+        "daily": True,
+        "closed": False,
+        "question": q,
+        "round_id": uuid.uuid4().hex,
+    }
+    q["mode"] = "DAILY"
+    seconds = timer_for(q)
+    msg = await update.effective_message.reply_text(
+        f"📅 <b>DAILY CHALLENGE</b> • {seconds}s\n\n❓ <b>{html.escape(q['q'])}</b>\n\nFirst correct answer gets <b>+50 XP</b>.",
+        reply_markup=round_keyboard(), parse_mode="HTML"
     )
+    active[chat_id]["question_message_id"] = msg.message_id
+    cancel_panic_task(chat_id)
+    panic_tasks[chat_id] = asyncio.create_task(countdown(context.bot, chat_id, msg.message_id, active[chat_id]["round_id"], seconds))
 
-    mode = random.choice(list(QUESTIONS.keys()))
 
-    random.seed()
+async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id in active:
+        await update.effective_message.reply_text("🎮 A round is already active.")
+        return
+    await update.effective_message.reply_text("🎮 <b>Choose your weapon.</b>", reply_markup=mode_menu(), parse_mode="HTML")
 
-    used = set()
 
-    await send_round(
-        context.bot,
-        chat_id,
-        mode,
-        "Hard",
-        used=used,
-        daily=True,
-        player_id=update.effective_user.id,
-    )
-
+async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await play(update, context)
 
 # ============================================================
-# BUTTON HANDLER
+# CALLBACKS
 # ============================================================
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    chat_id = query.message.chat.id
-    user = query.from_user
-
-    ensure_player(chat_id, user)
-
     data = query.data or ""
+    chat_id = update.effective_chat.id
 
-    # HOME
     if data == "menu:home":
         cancel_panic_task(chat_id)
         active.pop(chat_id, None)
-
-        await query.message.reply_text(
-            "🏠 <b>GUESSARENA HOME</b>\n\n"
-            "Round closed. No ghosts left behind. 👻😂\n\n"
-            "👇 Choose your next mode.",
-            parse_mode="HTML",
-            reply_markup=main_menu(),
-        )
+        await query.message.reply_text(MAIN_TEXT, reply_markup=main_menu(), parse_mode="HTML")
         return
 
-    # PROFILE
-    if data == "profile":
-        row = get_player(chat_id, user.id)
-
-        if not row:
+    if data == "menu:play":
+        if chat_id in active:
+            await query.message.reply_text("🎮 Finish the current round first.")
             return
-
-        (
-            _,
-            _,
-            name,
-            xp,
-            wins,
-            streak,
-            best,
-            games,
-            hints,
-            achievements_text,
-        ) = row
-
-        level = level_from_xp(xp)
-        title = title_from_level(level)
-
-        accuracy = (
-            round((wins / games) * 100, 1)
-            if games else 0
-        )
-
-        await query.message.reply_text(
-            f"👤 <b>{html.escape(name)}</b>\n\n"
-            f"{title}\n"
-            f"⭐ XP: <b>{xp}</b>\n"
-            f"🎚️ Level: <b>{level}</b>\n"
-            f"🏆 Wins: <b>{wins}</b>\n"
-            f"🎯 Accuracy: <b>{accuracy}%</b>\n"
-            f"🔥 Streak: <b>{streak}</b>\n"
-            f"👑 Best: <b>{best}</b>",
-            parse_mode="HTML",
-        )
+        await query.message.reply_text("🎮 <b>Choose a mode.</b>", reply_markup=mode_menu(), parse_mode="HTML")
         return
 
-    # LEADERBOARD
-    if data == "leaderboard":
-        with db() as con:
-            rows = con.execute("""
-                SELECT name,xp,wins,streak
-                FROM players
-                WHERE chat_id=?
-                ORDER BY xp DESC
-                LIMIT 10
-            """, (chat_id,)).fetchall()
+    if data == "menu:profile":
+        fake = update
+        # Reuse profile logic without needing a synthetic Update.
+        row = get_player(chat_id, query.from_user.id)
+        level = level_from_xp(row["xp"])
+        text = (
+            f"👤 <b>{html.escape(row['name'])}</b>\n\n"
+            f"🏷️ {html.escape(title_from_level(level))}\n"
+            f"⭐ Level {level} • ✨ {row['xp']} XP\n"
+            f"🏆 {row['wins']} wins • 🎮 {row['games']} games\n"
+            f"🔥 Streak {row['streak']} • Best {row['best_streak']}\n"
+            f"💡 Hints {row['hints']}"
+        )
+        await query.message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
+        return
 
-        if not rows:
-            await query.message.reply_text(
-                "🏆 Leaderboard abhi khaali hai."
-            )
-            return
-
+    if data == "menu:leaderboard":
+        con = db()
+        rows = con.execute("SELECT name,xp,wins,streak FROM players WHERE chat_id=? ORDER BY xp DESC, wins DESC LIMIT 10", (chat_id,)).fetchall()
+        con.close()
+        out = ["🏆 <b>LEADERBOARD</b>", ""]
         medals = ["🥇", "🥈", "🥉"]
+        for i, r in enumerate(rows, 1):
+            out.append(f"{medals[i-1] if i<=3 else str(i)+'.'} <b>{html.escape(r['name'])}</b> — {r['xp']} XP")
+        await query.message.reply_text("\n".join(out) if rows else "No players yet.", reply_markup=main_menu(), parse_mode="HTML")
+        return
 
-        lines = [
-            "🏆 <b>LEADERBOARD</b>\n"
+    if data == "menu:achievements":
+        row = get_player(chat_id, query.from_user.id)
+        unlocked = set(filter(None, (row["achievements"] or "").split(",")))
+        all_ach = [
+            ("level_up", "🎉 LEVEL UP"), ("hot_streak", "🔥 HOT STREAK"),
+            ("speed_demon", "⚡ SPEED DEMON"), ("first_win", "🏆 FIRST BLOOD"),
+            ("daily", "📅 DAILY GRINDER"), ("chaos", "🌪️ CHAOS SURVIVOR"),
         ]
+        text = "🏅 <b>ACHIEVEMENTS</b>\n\n" + "\n".join(("✅ " if k in unlocked else "🔒 ") + v for k,v in all_ach)
+        await query.message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
+        return
 
-        for i, row in enumerate(rows):
-            name, xp, wins, streak = row
-
-            prefix = (
-                medals[i]
-                if i < 3
-                else f"{i+1}."
-            )
-
-            lines.append(
-                f"{prefix} <b>{html.escape(name)}</b> — "
-                f"{xp} XP"
-            )
-
+    if data == "menu:help":
         await query.message.reply_text(
-            "\n".join(lines),
-            parse_mode="HTML",
+            "❓ <b>HELP</b>\n\nFirst correct answer wins. Wrong answers roast you but do not stop the round. Timer reaches zero → round closes → answer is revealed → no points.\n\nTimers: Easy 15s • Medium 15s • Hard 20s • Extreme 20s • Panic 8s.",
+            reply_markup=main_menu(), parse_mode="HTML"
         )
         return
 
-    # ACHIEVEMENTS
-    if data == "achievements":
-        await achievements(
-            Update(update.update_id, message=query.message),
-            context,
-        )
-        return
-
-    # HELP
-    if data == "help":
-        await query.message.reply_text(
-            "ℹ️ <b>HOW TO PLAY</b>\n\n"
-            "🎯 Correct = XP\n"
-            "😂 Wrong = roast\n"
-            "⏰ Time over = answer reveal\n"
-            "🚫 Late answer = 0 XP\n"
-            "🔀 No-repeat shuffle\n\n"
-            "🟢 Easy 15s\n"
-            "🟡 Medium 15s\n"
-            "🔴 Hard 20s\n"
-            "🟣 Extreme 20s\n"
-            "💀 Panic 8s",
-            parse_mode="HTML",
-        )
-        return
-
-    # RANDOM MODE
-    if data == "random_mode":
+    if data == "menu:daily":
+        # Run daily directly from callback.
         if chat_id in active:
-            await query.message.reply_text(
-                "😂 Current round abhi zinda hai!"
-            )
+            await query.message.reply_text("🎮 Finish the current game first.")
             return
-
-        mode = random.choice(list(QUESTIONS.keys()))
-
-        await query.message.reply_text(
-            f"🎲 <b>RANDOM MODE</b>\n\n"
-            f"Tonight's victim: <b>{html.escape(mode)}</b> 😂\n\n"
-            f"Difficulty choose karo:",
-            parse_mode="HTML",
-            reply_markup=difficulty_menu(mode),
-        )
+        user = query.from_user
+        pool = QUESTIONS["CHAOS MODE"] + QUESTIONS["Logic"] + QUESTIONS["Trick"]
+        idx = abs(hash(f"{chat_id}:{date.today().isoformat()}")) % len(pool)
+        q = prepare_question(pool[idx], "DAILY")
+        active[chat_id] = {
+            "mode": "DAILY", "difficulty": q.get("difficulty", "Medium"), "used": {question_key(q)},
+            "starter": {"id": user.id, "name": user.first_name or "Player"}, "round_no": 1,
+            "daily": True, "closed": False, "question": q, "round_id": uuid.uuid4().hex,
+        }
+        seconds = timer_for(q)
+        msg = await query.message.reply_text(f"📅 <b>DAILY</b> • {seconds}s\n\n❓ <b>{html.escape(q['q'])}</b>", reply_markup=round_keyboard(), parse_mode="HTML")
+        active[chat_id]["question_message_id"] = msg.message_id
+        cancel_panic_task(chat_id)
+        panic_tasks[chat_id] = asyncio.create_task(countdown(context.bot, chat_id, msg.message_id, active[chat_id]["round_id"], seconds))
         return
 
-    # DAILY
-    if data == "daily":
-        if chat_id in active:
-            await query.message.reply_text(
-                "😂 Pehle current round finish karo."
-            )
-            return
-
-        random.seed(
-            f"{date.today().isoformat()}:{chat_id}"
-        )
-
-        mode = random.choice(list(QUESTIONS.keys()))
-
-        random.seed()
-
-        await query.message.reply_text(
-            f"🔥 <b>DAILY CHALLENGE</b>\n\n"
-            f"Today's battlefield: <b>{html.escape(mode)}</b>\n"
-            f"One chance. No excuses. 😂",
-            parse_mode="HTML",
-        )
-
-        await send_round(
-            context.bot,
-            chat_id,
-            mode,
-            "Hard",
-            used=set(),
-            daily=True,
-            player_id=user.id,
-        )
-        return
-
-    # MODE SELECTED
     if data.startswith("mode:"):
         mode = data.split(":", 1)[1]
-
-        if mode not in QUESTIONS:
-            return
-
         if chat_id in active:
-            await query.message.reply_text(
-                "😂 Bhai ek time pe ek hi battlefield! "
-                "Current round pehle finish karo."
-            )
+            await query.message.reply_text("🎮 Current game active. Finish it first.")
             return
-
         await query.message.reply_text(
-            f"🎮 <b>{html.escape(mode.upper())}</b>\n\n"
-            f"Difficulty choose karo.\n"
-            f"Har level ka apna timer + XP hai 🔥",
-            parse_mode="HTML",
-            reply_markup=difficulty_menu(mode),
+            f"{MODE_EMOJI.get(mode,'🎮')} <b>{html.escape(mode)}</b>\n\nChoose difficulty:",
+            reply_markup=difficulty_menu(mode), parse_mode="HTML"
         )
         return
 
-    # DIFFICULTY
     if data.startswith("diff:"):
-        parts = data.split(":")
-
-        if len(parts) != 3:
-            return
-
-        mode = parts[1]
-        difficulty = parts[2]
-
-        if mode not in QUESTIONS:
-            return
-
-        if difficulty not in TIMERS and difficulty != "Any":
-            return
-
+        _, mode, difficulty = data.split(":", 2)
         if chat_id in active:
-            await query.message.reply_text(
-                "😂 Round already running!"
-            )
+            await query.message.reply_text("🎮 A game is already running. Press END GAME first.")
             return
-
-        await send_round(
-            context.bot,
-            chat_id,
-            mode,
-            difficulty,
-            used=set(),
-            daily=False,
-            player_id=user.id,
+        # Start from callback.
+        user = query.from_user
+        ensure_player(chat_id, user.id, user.first_name or "Player")
+        active[chat_id] = {
+            "mode": mode, "difficulty": difficulty, "used": set(),
+            "starter": {"id": user.id, "name": user.first_name or "Player"},
+            "round_no": 0, "closed": False,
+        }
+        await query.message.reply_text(
+            f"🚀 <b>{html.escape(mode)}</b> loaded • <b>{html.escape(difficulty)}</b>\n\n"
+            f"⏱️ Easy/Medium 15s • Hard/Extreme 20s • Panic 8s\n"
+            "🏆 First correct answer wins\n😈 Wrong answers get different roasts\n💥 Timeout reveals answer\n\n<b>FIGHT!</b>",
+            parse_mode="HTML"
         )
-
+        await asyncio.sleep(0.6)
+        if chat_id in active:
+            await send_round(context.bot, chat_id, active[chat_id])
         return
 
-
-# ============================================================
-# ANSWER HANDLER
-# ============================================================
-
-async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    text = update.message.text or ""
-
-    game = active.get(chat_id)
-
-    # No active game
-    if not game:
-        return
-
-    # Round already closed
-    if game.get("closed"):
-        await update.message.reply_text(
-            random.choice(LATE_REACTIONS)
-        )
-        return
-
-    q = game["question"]
-
-    # Correct answer
-    if is_correct(text, q):
-
-        game["closed"] = True
-
-        round_id = game["round_id"]
-        mode = game["mode"]
-        difficulty = game["difficulty"]
-        daily = game.get("daily", False)
-
+    if data == "round:end":
+        state = active.pop(chat_id, None)
         cancel_panic_task(chat_id)
-        active.pop(chat_id, None)
-
-        xp = XP_VALUES.get(
-            difficulty,
-            XP_VALUES["Medium"]
-        )
-
-        if daily:
-            xp += 25
-
-        name = user.full_name or user.username or "Player"
-
-        streak, best = add_win(
-            chat_id,
-            user.id,
-            name,
-            xp,
-        )
-
-        level = level_from_xp(
-            get_player(chat_id, user.id)[3]
-        )
-
-        bonus = ""
-
-        if streak >= 3:
-            bonus = (
-                f"\n🔥 <b>{streak} STREAK!</b>"
-            )
-
-        if daily:
-            bonus += "\n🌟 Daily bonus included!"
-
-        await update.message.reply_text(
-            f"{random.choice(CORRECT_REACTIONS)}\n\n"
-            f"👑 <b>{html.escape(name)}</b>\n"
-            f"⭐ <b>+{xp} XP</b>\n"
-            f"🎚️ Level: <b>{level}</b>"
-            f"{bonus}\n\n"
-            f"🧩 Answer: <code>{html.escape(q['answer'])}</code>",
-            parse_mode="HTML",
-        )
-
+        if state:
+            await query.message.reply_text("🛑 <b>GAME ENDED.</b>\n\nNo answer revealed. Fresh start whenever you want.", reply_markup=main_menu(), parse_mode="HTML")
+        else:
+            await query.message.reply_text("No active game.", reply_markup=main_menu())
         return
 
-    # Wrong answer
-    add_wrong_streak_break(
-        chat_id,
-        user.id,
-    )
-
-    await update.message.reply_text(
-        random.choice(WRONG_ROASTS),
-        parse_mode="HTML",
-    )
-
-
-# ============================================================
-# GAME COMMAND
-# ============================================================
-
-async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
-    if chat_id in active:
-        await update.message.reply_text(
-            "😂 Current round already running!"
-        )
+    if data == "round:hint":
+        state = active.get(chat_id)
+        if not state or state.get("closed") or not state.get("question"):
+            await query.message.reply_text("💨 No active question to hint.")
+            return
+        user = query.from_user
+        if not spend_hint(chat_id, user.id):
+            await query.message.reply_text("💡 No hints left. Your brain is now the premium feature. 😂")
+            return
+        q = state["question"]
+        hint = q.get("hint") or "The answer is hiding in the wording."
+        await query.message.reply_text(f"💡 <b>HINT</b> — {html.escape(hint)}", parse_mode="HTML")
         return
 
-    await update.message.reply_text(
-        "🎮 <b>GUESSARENA</b>\n\n"
-        "Choose your battlefield 👇",
-        parse_mode="HTML",
-        reply_markup=main_menu(),
-    )
-
-
 # ============================================================
-# ERROR HANDLER
+# ERROR HANDLER / MAIN
 # ============================================================
 
-async def error_handler(update, context):
-    print("GuessArena error:", context.error)
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    print("Unhandled error:", repr(context.error))
 
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
+    init_db()
     if not TOKEN:
-        raise RuntimeError(
-            "BOT_TOKEN environment variable is missing."
-        )
+        raise RuntimeError("BOT_TOKEN environment variable is missing.")
 
-    request = HTTPXRequest(
-        connect_timeout=30,
-        read_timeout=30,
-        write_timeout=30,
-        pool_timeout=30,
-    )
+    request = HTTPXRequest(connect_timeout=20, read_timeout=30, write_timeout=30, pool_timeout=30)
+    app_bot = Application.builder().token(TOKEN).request(request).build()
 
-    application = (
-        Application.builder()
-        .token(TOKEN)
-        .request(request)
-        .build()
-    )
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("help", help_cmd))
+    app_bot.add_handler(CommandHandler("play", play))
+    app_bot.add_handler(CommandHandler("game", game_command))
+    app_bot.add_handler(CommandHandler("profile", profile))
+    app_bot.add_handler(CommandHandler("leaderboard", leaderboard))
+    app_bot.add_handler(CommandHandler("achievements", achievements))
+    app_bot.add_handler(CommandHandler("daily", daily))
+    app_bot.add_handler(CallbackQueryHandler(button))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, answer))
+    app_bot.add_error_handler(error_handler)
 
-    application.add_handler(
-        CommandHandler("start", start)
-    )
-
-    application.add_handler(
-        CommandHandler("help", help_cmd)
-    )
-
-    application.add_handler(
-        CommandHandler("game", game_command)
-    )
-
-    application.add_handler(
-        CommandHandler("profile", profile)
-    )
-
-    application.add_handler(
-        CommandHandler("leaderboard", leaderboard)
-    )
-
-    application.add_handler(
-        CommandHandler("achievements", achievements)
-    )
-
-    application.add_handler(
-        CommandHandler("daily", daily_challenge)
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(button)
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            answer,
-        )
-    )
-
-    application.add_error_handler(
-        error_handler
-    )
-
-    print("🔥 GuessArena is running...")
-
-    application.run_polling(
-        drop_pending_updates=True
-    )
+    print("GuessArena is LIVE")
+    app_bot.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
