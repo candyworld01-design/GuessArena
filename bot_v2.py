@@ -536,7 +536,8 @@ async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
         )
         return
-
+if game_data.get("panic_job"):
+    game_data["panic_job"].schedule_removal()
     active.pop(chat_id, None)
 
     cur.execute(
