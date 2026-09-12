@@ -429,31 +429,63 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 # GAME
 # =========================================================
-async def panic_timeout(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.job.data
 
-    game_data = active.get(chat_id)
+async def panic_countdown(chat_id, context):
+    try:
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text="⚡ <b>PANIC MODE!</b>\n\n⏳ <b>5</b>",
+            parse_mode="HTML",
+        )
 
-    if not game_data:
+        for seconds in range(4, 0, -1):
+            await asyncio.sleep(1)
+
+            game_data = active.get(chat_id)
+
+            if not game_data or not game_data.get("panic", False):
+                return
+
+            try:
+                await msg.edit_text(
+                    f"⚡ <b>PANIC MODE!</b>\n\n⏳ <b>{seconds}</b>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+        await asyncio.sleep(1)
+
+        game_data = active.get(chat_id)
+
+        if game_data and game_data.get("panic", False):
+            active.pop(chat_id, None)
+
+            try:
+                await msg.edit_text(
+                    "💀 <b>TIME UP!</b>\n\n"
+                    "5 seconds khatam! 😂\n"
+                    "Panic ne tumhe hara diya!",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="💀 <b>TIME UP!</b>\n\n5 seconds khatam! 😂",
+                    parse_mode="HTML",
+                )
+
+    except asyncio.CancelledError:
         return
 
-    if not game_data.get("panic", False):
-        return
 
-    active.pop(chat_id, None)
-
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="⏰ <b>TIME UP!</b> 😂\n\n5 seconds khatam!\nPanic ne tumhe hara diya 💀",
-        parse_mode="HTML",
-    )
 async def start_game(update, context, mode="Random", difficulty="Any"):
     chat_id = update.effective_chat.id
 
     if chat_id in active:
         await update.effective_message.reply_text(
             "⚡ <b>Round already running!</b>\n\n"
-            "🧩 Answer the current puzzle first.",
+            "Pehle current question ka answer do 😎",
             parse_mode="HTML",
         )
         return
@@ -466,33 +498,24 @@ async def start_game(update, context, mode="Random", difficulty="Any"):
         "xp": q["xp"],
         "mode": q["mode"],
         "difficulty": q["difficulty"],
-        "panic": mode == "Panic",
+        "panic": mode == "Panic" and q["mode"] == "Panic",
+        "panic_task": None,
     }
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(
-                "💡 Hint",
-                callback_data=f"hint:{chat_id}"
-            )
+            InlineKeyboardButton("💡 Hint", callback_data="hint"),
         ],
         [
-            InlineKeyboardButton(
-                "🏠 Menu",
-                callback_data="menu:home"
-            )
+            InlineKeyboardButton("🏠 Menu", callback_data="menu"),
         ],
     ])
 
     text = (
-        "🎮 <b>GUESSARENA</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"{difficulty_icon(q['difficulty'])} <b>{q['difficulty'].upper()} • {q['mode'].upper()}</b>\n\n"
-        "🧩 <b>YOUR PUZZLE</b>\n"
-        f"{q['q']}\n\n"
-        f"🏆 Reward: <b>+{q['xp']} XP</b>\n"
-        "💡 Need help? Use the Hint button.\n\n"
-        "✍️ <b>Type your answer below!</b>"
+        f"🎮 <b>{q['mode']} MODE</b>\n"
+        f"🔥 Difficulty: <b>{q['difficulty']}</b>\n\n"
+        f"🧩 <b>{q['question']}</b>\n\n"
+        f"✍️ Answer bhejo!"
     )
 
     await update.effective_message.reply_text(
@@ -500,135 +523,153 @@ async def start_game(update, context, mode="Random", difficulty="Any"):
         parse_mode="HTML",
         reply_markup=keyboard,
     )
-    if mode == "Panic":
-    await update.effective_message.reply_text(
-        "⚡ PANIC MODE! Sirf 5 seconds! GO! 🔥"
-    )
+
+    if active[chat_id]["panic"]:
+        active[chat_id]["panic_task"] = asyncio.create_task(
+            panic_countdown(chat_id, context)
+        )
 
 
-async def game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start_game(update, context)
+async def game(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+
+    if data.startswith("mode:"):
+        mode = data.split(":", 1)[1]
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🟢 Easy", callback_data=f"diff:{mode}:Easy"),
+                InlineKeyboardButton("🟡 Medium", callback_data=f"diff:{mode}:Medium"),
+            ],
+            [
+                InlineKeyboardButton("🔴 Hard", callback_data=f"diff:{mode}:Hard"),
+                InlineKeyboardButton("💀 Extreme", callback_data=f"diff:{mode}:Extreme"),
+            ],
+        ])
+
+        await query.edit_message_text(
+            f"🎮 <b>{mode} MODE</b>\n\n"
+            "Difficulty choose karo 👇",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        return
+
+    if data.startswith("diff:"):
+        _, mode, difficulty = data.split(":", 2)
+
+        await start_game(
+            update,
+            context,
+            mode=mode,
+            difficulty=difficulty,
+        )
+        return
+
+    if data == "hint":
+        chat_id = update.effective_chat.id
+
+        if chat_id not in active:
+            await query.message.reply_text(
+                "❌ Koi active game nahi hai!"
+            )
+            return
+
+        await query.message.reply_text(
+            f"💡 <b>Hint:</b> {active[chat_id]['hint']}",
+            parse_mode="HTML",
+        )
+        return
+
+    if data == "menu":
+        active.pop(update.effective_chat.id, None)
+
+        await query.edit_message_text(
+            "🏠 <b>GuessArena</b>\n\n"
+            "Game cancelled 😎",
+            parse_mode="HTML",
+        )
 
 
 # =========================================================
 # ANSWER
 # =========================================================
 
-async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-
+async def answer(update, context):
     chat_id = update.effective_chat.id
-    game_data = active.get(chat_id)
 
-    if not game_data:
+    if chat_id not in active:
         return
 
-    user = update.effective_user
-    ensure_player(chat_id, user)
+    game_data = active[chat_id]
 
     guess = normalize(update.message.text)
 
     if guess not in game_data["answers"]:
         await update.message.reply_text(
             "❌ <b>Not quite!</b>\n"
-            "Keep thinking... 🧠",
+            "Keep thinking... 🧠😂",
             parse_mode="HTML",
         )
         return
-if game_data.get("panic_job"):
-    game_data["panic_job"].schedule_removal()
+
+    # Stop Panic timer
+    panic_task = game_data.get("panic_task")
+
+    if panic_task:
+        panic_task.cancel()
+
     active.pop(chat_id, None)
 
+    ensure_player(update.effective_user)
+
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+
     cur.execute(
-        """SELECT xp,wins,streak,best_streak,games,achievements
-           FROM players WHERE chat_id=? AND user_id=?""",
-        (chat_id, user.id),
+        "SELECT xp, games, wins, streak FROM players WHERE user_id=?",
+        (update.effective_user.id,),
     )
 
     row = cur.fetchone()
-    old_xp, wins, streak, best_streak, games, achievements = row
 
-    new_streak = streak + 1
-    best_streak = max(best_streak, new_streak)
-    reward = game_data["xp"]
+    if row:
+        xp, games, wins, streak = row
 
-    # Streak bonus
-    bonus = 0
-    if new_streak >= 3:
-        bonus = 5
-    if new_streak >= 5:
-        bonus = 10
+        xp += game_data["xp"]
+        games += 1
+        wins += 1
+        streak += 1
 
-    total_reward = reward + bonus
-    new_xp = old_xp + total_reward
-    new_wins = wins + 1
-    new_games = games + 1
-
-    achievements_list = [x for x in achievements.split("|") if x]
-
-    if new_wins >= 1 and "FIRST_WIN" not in achievements_list:
-        achievements_list.append("FIRST_WIN")
-
-    if new_wins >= 10 and "TEN_WINS" not in achievements_list:
-        achievements_list.append("TEN_WINS")
-
-    if best_streak >= 5 and "FIVE_STREAK" not in achievements_list:
-        achievements_list.append("FIVE_STREAK")
-
-    cur.execute(
-        """UPDATE players
-           SET xp=?,wins=?,streak=?,best_streak=?,games=?,achievements=?
-           WHERE chat_id=? AND user_id=?""",
-        (
-            new_xp,
-            new_wins,
-            new_streak,
-            best_streak,
-            new_games,
-            "|".join(achievements_list),
-            chat_id,
-            user.id,
-        ),
-    )
+        cur.execute(
+            """
+            UPDATE players
+            SET xp=?, games=?, wins=?, streak=?
+            WHERE user_id=?
+            """,
+            (
+                xp,
+                games,
+                wins,
+                streak,
+                update.effective_user.id,
+            ),
+        )
 
     conn.commit()
-
-    level = level_from_xp(new_xp)
-
-    bonus_text = ""
-    if bonus:
-        bonus_text = f"\n🔥 Streak bonus: <b>+{bonus} XP</b>"
-
-    text = (
-        "🎉 <b>CORRECT!</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"🥇 <b>{html.escape(user.full_name)}</b> got it first!\n\n"
-        f"🏆 Puzzle XP: <b>+{reward}</b>"
-        f"{bonus_text}\n"
-        f"⭐ Total XP: <b>{new_xp}</b>\n"
-        f"🔥 Streak: <b>{new_streak}</b>\n"
-        f"📈 Level: <b>{level}</b>\n\n"
-        "🎮 Ready for another round?"
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎮 Next Round", callback_data="menu:play")],
-        [InlineKeyboardButton("🏆 Leaderboard", callback_data="menu:leaderboard")],
-    ])
+    conn.close()
 
     await update.message.reply_text(
-        text,
+        "🎉 <b>CORRECT!</b> 🔥🔥\n\n"
+        f"⚡ +{game_data['xp']} XP\n"
+        "🧠 Brain = OP 😂\n\n"
+        "🏆 Next round ke liye ready?",
         parse_mode="HTML",
-        reply_markup=keyboard,
     )
-if mode == "Panic":
-    job = context.job_queue.run_once(
-        panic_timeout,
-        PANIC_TIME,
-        data=chat_id
-    )
-    active[chat_id]["panic_job"] = job
+
 
 # =========================================================
 # PROFILE
