@@ -621,7 +621,13 @@ async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=keyboard,
     )
-
+if mode == "Panic":
+    job = context.job_queue.run_once(
+        panic_timeout,
+        PANIC_TIME,
+        data=chat_id
+    )
+    active[chat_id]["panic_job"] = job
 
 # =========================================================
 # PROFILE
