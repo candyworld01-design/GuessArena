@@ -1,20 +1,24 @@
 import os
-from flask import Flask
 from threading import Thread
+from flask import Flask
 
-app = Flask('')
-
-
-@app.route('/')
-def home():
-    return 'Bot Alive'
+app = Flask(__name__)
 
 
-def run():
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+@app.route("/")
+def health_check():
+    return "Bot is Alive!", 200
 
 
-Thread(target=run).start()
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+
+# Render port scan timing ke liye thread ko daemon mode me start karein
+server_thread = Thread(target=run_web_server, daemon=True)
+server_thread.start()
+
 import os
 import random
 import sqlite3
