@@ -25,7 +25,7 @@ import sqlite3
 import html
 import hashlib
 from datetime import date
-
+import asyncio
 from telegram import Update
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.request import HTTPXRequest
