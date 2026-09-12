@@ -616,14 +616,10 @@ for mode in ["Buzzer Battle", "Panic", "CHAOS MODE"]:
         QUESTIONS[mode].append(Q(q, a, d, aliases, "Fast calculation.", "Basic arithmetic."))
 
 # ============================================================
-# GAME STATE + ROBUST ROUND ENGINE
+# GAME STATE
 # ============================================================
-# A chat has ONE live game session.  The session survives correct answers
-# and advances automatically.  It is removed only when the game ends,
-# the timer expires, or the player explicitly presses END GAME/HOME.
 active = {}
 panic_tasks = {}
-advance_tasks = {}
 
 
 def cancel_panic_task(chat_id):
@@ -632,30 +628,19 @@ def cancel_panic_task(chat_id):
         task.cancel()
 
 
-def cancel_advance_task(chat_id):
-    task = advance_tasks.pop(chat_id, None)
-    if task and not task.done():
-        task.cancel()
-
-
-def cancel_all_tasks(chat_id):
-    cancel_panic_task(chat_id)
-    cancel_advance_task(chat_id)
-
-
 def normalize(text):
     text = html.unescape(text or "")
     text = text.lower().strip()
     for ch in "!?.,:;()[]{}\"'`“”‘’":
         text = text.replace(ch, " ")
+    text = " ".join(text.split())
     replacements = {
-        "×": "*", "÷": "/", "−": "-", "–": "-",
+        "×": "*", "÷": "/", "−": "-",
         "kilometers": "kilometres", "kilometer": "kilometre",
-        "colour": "color",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
-    return " ".join(text.split())
+    return text
 
 
 def question_key(q):
@@ -679,18 +664,67 @@ def pool_for(mode, difficulty):
 
 def choose_question(mode, difficulty, used):
     pool = pool_for(mode, difficulty)
-    if not pool:
-        return None
-
-    # IMPORTANT: compare the same tuple that is stored in used.
     available = [q for q in pool if question_key(q) not in used]
     if not available:
         used.clear()
         available = pool[:]
-
+    if not available:
+        return None
     q = random.choice(available)
     used.add(question_key(q))
     return q
+
+# ============================================================
+# UI / TEXT
+# ============================================================
+
+MAIN_TEXT = """🏟️ <b>GUESSARENA</b>
+
+Welcome to the arena where your brain gets XP and your confidence gets audited. 😂
+
+Pick a mode, pick a difficulty, then beat the clock.
+<b>Group rule:</b> first correct answer wins the round.
+<b>Timeout:</b> round ends + answer revealed + no points.
+"""
+
+
+def main_menu():
+    rows = [
+        [InlineKeyboardButton("🎮 PLAY", callback_data="menu:play"), InlineKeyboardButton("👤 PROFILE", callback_data="menu:profile")],
+        [InlineKeyboardButton("🏆 LEADERBOARD", callback_data="menu:leaderboard"), InlineKeyboardButton("🏅 ACHIEVEMENTS", callback_data="menu:achievements")],
+        [InlineKeyboardButton("📅 DAILY", callback_data="menu:daily"), InlineKeyboardButton("❓ HELP", callback_data="menu:help")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def mode_menu():
+    modes = list(QUESTIONS.keys())
+    rows = []
+    for i in range(0, len(modes), 2):
+        row = []
+        for mode in modes[i:i+2]:
+            row.append(InlineKeyboardButton(f"{MODE_EMOJI.get(mode,'🎮')} {mode}", callback_data=f"mode:{mode}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🏠 HOME", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def difficulty_menu(mode):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 EASY • 15s", callback_data=f"diff:{mode}:Easy")],
+        [InlineKeyboardButton("🟡 MEDIUM • 15s", callback_data=f"diff:{mode}:Medium")],
+        [InlineKeyboardButton("🔴 HARD • 20s", callback_data=f"diff:{mode}:Hard")],
+        [InlineKeyboardButton("🟣 EXTREME • 20s", callback_data=f"diff:{mode}:Extreme")],
+        [InlineKeyboardButton("🚨 PANIC • 8s", callback_data=f"diff:{mode}:Panic")],
+        [InlineKeyboardButton("🎲 ANY • mixed", callback_data=f"diff:{mode}:Any")],
+        [InlineKeyboardButton("⬅️ MODES", callback_data="menu:play"), InlineKeyboardButton("🏠 HOME", callback_data="menu:home")],
+    ])
+
+
+def round_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💡 HINT", callback_data="round:hint"), InlineKeyboardButton("🛑 END GAME", callback_data="round:end")],
+    ])
 
 
 def xp_for(q):
@@ -701,144 +735,149 @@ def timer_for(q):
     return TIMERS.get(q.get("difficulty", "Medium"), 15)
 
 
-def active_is(chat_id, state, round_id=None):
-    current = active.get(chat_id)
-    if current is not state:
-        return False
-    if state.get("status") != "question":
-        return False
-    if round_id is not None and state.get("round_id") != round_id:
-        return False
-    return True
+def mode_intro(mode, difficulty):
+    intros = {
+        "Word": "Dictionary just entered the boxing ring.",
+        "Animal": "Nature has questions. You have 15 seconds.",
+        "Emoji": "Decode the chaos before the emojis judge you.",
+        "City": "Pack your imaginary suitcase.",
+        "Riddle": "Logic is optional. Confidence is dangerous.",
+        "Logic": "Your brain has been summoned.",
+        "Trick": "Read twice. Answer once. Regret immediately.",
+        "Pattern": "Find the rule before the rule finds you.",
+        "Panic": "NO TIME TO OVERTHINK. GO.",
+        "Bluff Master": "One statement is lying. Catch it.",
+        "Risk It": "High XP. High ego damage.",
+        "Memory Bomb": "Remember first. Panic later.",
+        "One Word Chaos": "One word. No essays. No TED Talk.",
+        "Target Number": "Numbers have been weaponized.",
+        "Mystery Power": "Science is about to throw hands.",
+        "Sabotage Round": "The question itself may be trying to sabotage you.",
+        "Buzzer Battle": "Fastest brain gets the crown.",
+        "CHAOS MODE": "Rules are normal. Your confidence isn't.",
+        "King of the Hill": "Stay alive. Keep the streak. Own the hill.",
+    }
+    return f"{MODE_EMOJI.get(mode,'🎮')} <b>{html.escape(mode)}</b> • <b>{difficulty}</b>\n{intros.get(mode,'Arena round started.')}"
 
+ROAST_WRONG = [
+    "💀 Bro answered with confidence and left with evidence.",
+    "😂 That answer had premium confidence and free accuracy.",
+    "🫠 Brain.exe has stopped responding.",
+    "😭 The question asked one thing. You invented another.",
+    "🤡 Bold answer. Unfortunately, reality disagrees.",
+    "📉 Accuracy graph just took a personal day.",
+    "💀 That wasn't wrong. That was creatively incorrect.",
+    "😂 Your brain really said: 'Let's gamble.'",
+    "🧠❌ CPU overheating. Result unavailable.",
+    "🚑 Someone escort that answer out of the arena.",
+    "😈 Nice try. The scoreboard remains unimpressed.",
+    "💥 Critical hit... on yourself.",
+    "🪦 A beautiful answer. May it rest in peace.",
+    "📢 Breaking news: answer has been declared fictional.",
+    "😂 You didn't miss the answer. You explored another universe.",
+]
 
-def make_round_text(state, q):
-    mode = state["mode"]
-    selected_difficulty = state["difficulty"]
-    actual_difficulty = q.get("difficulty", selected_difficulty)
-    seconds = timer_for(q)
-    xp = xp_for(q)
+ROAST_TIMEOUT = [
+    "⏰ TIME! The clock won. Your brain filed an appeal.",
+    "🚨 8/15/20 seconds vanished like your answer.",
+    "💀 Time has officially left the chat.",
+    "😂 You had a timer. The timer had you.",
+    "⌛ Round expired. Confidence loading... still loading.",
+    "🫠 The answer was waiting. You were buffering.",
+    "🚪 Time-out! The question has escaped.",
+    "📉 Zero points. Maximum dramatic suspense.",
+    "💥 BOOM. Timer detonated the round.",
+    "😵 You didn't answer. The clock answered for you: NOPE.",
+]
 
-    starter = state.get("starter")
-    streak = 0
-    if starter:
-        row = get_player(state["chat_id"], starter["id"])
-        streak = row["streak"] if row else 0
+ROAST_CORRECT = [
+    "🔥 CLEAN HIT!",
+    "🧠 BIG BRAIN DETECTED.",
+    "👑 THAT'S HOW YOU PLAY.",
+    "⚡ Faster than the group chat gossip.",
+    "🎯 Bullseye. Absolutely illegal levels of confidence.",
+    "💎 Correct AND early. Disrespectful.",
+    "🚀 Brain launched successfully.",
+    "😈 Somebody came prepared.",
+    "🏆 The arena has been informed of your existence.",
+    "💥 BOOM! Correct answer secured.",
+    "🫡 Respect. That one was clean.",
+    "📈 XP printer activated.",
+    "🔥 The scoreboard just got nervous.",
+    "🧠 Neurons doing overtime.",
+    "👀 Everyone else is suddenly very quiet.",
+]
 
-    header = mode_intro(mode, actual_difficulty)
-    streak_text = f"🔥 Streak: {streak}" if streak else "🔥 Streak: 0"
-    progress = f"📍 Round <b>{state['round_no']}</b>"
-    if state.get("difficulty") == "Any":
-        progress += " • 🎲 Mixed difficulty"
+LATE_LINES = [
+    "⛔ Round closed. Bro, that answer arrived after the funeral.",
+    "😂 Too late! Correctness without timing = spectator mode.",
+    "🚫 Buzzer already fired. Nice answer, wrong universe.",
+    "⌛ The round has moved on. Your message is now historical evidence.",
+    "😈 Correct or not, the arena waits for nobody.",
+]
 
-    return (
-        f"{header}\n\n"
-        f"{progress} • <b>+{xp} XP</b> • ⏱️ <b>{seconds}s</b>\n"
-        f"{streak_text}\n\n"
-        f"❓ <b>{html.escape(str(q['q']))}</b>\n\n"
-        f"👥 <i>First correct answer wins this round.</i>"
-    )
+STREAK_LINES = [
+    "🔥 STREAK {streak}! Someone stop this person.",
+    "👑 {streak} in a row. The hill is getting nervous.",
+    "⚡ {streak}-streak! Brain refusing to clock out.",
+    "💀 {streak} straight. Other players are reconsidering friendship.",
+    "📈 Streak {streak}. This is becoming a problem.",
+]
 
+# ============================================================
+# GAME FLOW
+# ============================================================
 
 async def safe_edit(message, text, reply_markup=None):
     try:
-        return await message.edit_text(
-            text,
-            reply_markup=reply_markup,
-            parse_mode="HTML",
-        )
+        return await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
     except Exception:
         return None
 
 
-async def countdown(bot, chat_id, state, round_id, seconds):
+def active_is(chat_id, round_id):
+    state = active.get(chat_id)
+    return bool(state and state.get("round_id") == round_id and not state.get("closed"))
+
+
+async def countdown(bot, chat_id, message_id, round_id, seconds):
     task = asyncio.current_task()
     timer_msg = None
     try:
-        if not active_is(chat_id, state, round_id):
-            return
-
-        timer_msg = await bot.send_message(
-            chat_id,
-            f"⏱️ <b>{seconds}s</b> — GO!",
-            parse_mode="HTML",
-        )
-        state["timer_message_id"] = timer_msg.message_id
-
+        # Send a separate timer so the question message stays readable.
+        timer_msg = await bot.send_message(chat_id, f"⏱️ <b>{seconds}s</b>", parse_mode="HTML")
         for left in range(seconds - 1, -1, -1):
             await asyncio.sleep(1)
-
-            if not active_is(chat_id, state, round_id):
+            if not active_is(chat_id, round_id):
                 return
-
-            if timer_msg:
-                try:
-                    if left > 0:
-                        if left <= 3:
-                            label = f"🚨 <b>{left}s</b> — ANSWER NOW!"
-                        else:
-                            label = f"⏱️ <b>{left}s</b>"
-                    else:
-                        label = "💥 <b>TIME OVER!</b>"
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=timer_msg.message_id,
-                        text=label,
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
-
-            if left == 0:
-                break
-
-        # Never reveal an old question if another round already started.
-        if not active_is(chat_id, state, round_id):
-            return
-
-        state["status"] = "timeout"
-        q = state.get("question")
-        active.pop(chat_id, None)
-
-        # Stop the timer before revealing the answer.
-        if timer_msg:
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=timer_msg.message_id,
-                    text="💥 <b>TIME OVER!</b> — round closed",
+                    text=f"⏱️ <b>{left}s</b>" if left > 0 else "💥 <b>TIME!</b>",
                     parse_mode="HTML",
                 )
             except Exception:
                 pass
-
-        if q:
-            answer_text = html.escape(str(q["a"]))
-            reveal = f"📖 <b>Answer:</b> {answer_text}"
-            if q.get("explain"):
-                reveal += f"\n💡 {html.escape(str(q['explain']))}"
-        else:
-            reveal = "📖 Answer unavailable."
-
+            if left == 0:
+                break
+        if not active_is(chat_id, round_id):
+            return
+        state = active.get(chat_id)
+        state["closed"] = True
+        q = state["question"]
+        active.pop(chat_id, None)
+        used_answer = html.escape(str(q["a"]))
         roast = random.choice(ROAST_TIMEOUT)
-        await bot.send_message(
-            chat_id,
-            f"{roast}\n\n{reveal}\n\n"
-            f"🛑 <b>GAME OVER</b> — no points this round.\n"
-            f"Use <b>PLAY</b> for a fresh run.",
-            reply_markup=main_menu(),
-            parse_mode="HTML",
-        )
-
+        extra = f"\n\n📖 <b>Answer:</b> {used_answer}"
+        if q.get("explain"):
+            extra += f"\n💡 {html.escape(q['explain'])}"
+        await bot.send_message(chat_id, f"{roast}{extra}\n\n<b>Round over.</b> Start another game from /start.", parse_mode="HTML")
+        # Timeout counts as a resolved game for the player who was active in PM; in groups
+        # we don't punish the whole group by changing everyone’s streak.
         starter = state.get("starter")
         if starter:
-            add_result(
-                chat_id,
-                starter["id"],
-                starter["name"],
-                reset_streak=True,
-            )
-
+            add_result(chat_id, starter["id"], starter["name"], reset_streak=True)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -849,144 +888,74 @@ async def countdown(bot, chat_id, state, round_id, seconds):
 
 
 async def send_round(bot, chat_id, state):
-    # Do not let an obsolete task create a round in another game.
-    if active.get(chat_id) is not state:
-        return
-
     difficulty = state["difficulty"]
     mode = state["mode"]
     q = choose_question(mode, difficulty, state["used"])
     if not q:
+        await bot.send_message(chat_id, "⚠️ Question pool is empty. Try another mode.")
         active.pop(chat_id, None)
-        await bot.send_message(
-            chat_id,
-            "⚠️ <b>Question vault empty.</b> Try another mode.",
-            reply_markup=main_menu(),
-            parse_mode="HTML",
-        )
         return
-
-    cancel_panic_task(chat_id)
-
     state["question"] = q
     state["round_id"] = uuid.uuid4().hex
-    state["status"] = "question"
+    state["closed"] = False
     state["round_no"] = state.get("round_no", 0) + 1
-    state["answered_by"] = None
-    state["timer_message_id"] = None
-
     round_id = state["round_id"]
     seconds = timer_for(q)
+    xp = xp_for(q)
 
-    text = make_round_text(state, q)
-    msg = await bot.send_message(
-        chat_id,
-        text,
-        reply_markup=round_keyboard(),
-        parse_mode="HTML",
+    header = mode_intro(mode, q.get("difficulty", difficulty))
+    streak = get_player(chat_id, state["starter"]["id"])["streak"] if state.get("starter") else 0
+    streak_text = f"🔥 Streak: {streak}" if streak else "🔥 Streak: 0"
+    text = (
+        f"{header}\n\n"
+        f"<b>ROUND {state['round_no']}</b> • +{xp} XP\n"
+        f"{streak_text}\n\n"
+        f"❓ <b>{html.escape(q['q'])}</b>\n\n"
+        f"👥 <i>First correct answer wins this round.</i>"
     )
+    msg = await bot.send_message(chat_id, text, reply_markup=round_keyboard(), parse_mode="HTML")
     state["question_message_id"] = msg.message_id
-
-    # Create the timer only after the question exists.
-    if active.get(chat_id) is state and state.get("round_id") == round_id:
-        task = asyncio.create_task(
-            countdown(bot, chat_id, state, round_id, seconds)
-        )
-        panic_tasks[chat_id] = task
-
-
-async def advance_after_correct(bot, chat_id, state, old_round_id):
-    task = asyncio.current_task()
-    try:
-        await asyncio.sleep(1.25)
-
-        # A user may have pressed HOME/END or started another game.
-        if active.get(chat_id) is not state:
-            return
-        if state.get("round_id") != old_round_id:
-            return
-        if state.get("status") != "correct":
-            return
-
-        state["status"] = "transition"
-        await send_round(bot, chat_id, state)
-
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        print("advance error:", repr(e))
-    finally:
-        if advance_tasks.get(chat_id) is task:
-            advance_tasks.pop(chat_id, None)
+    cancel_panic_task(chat_id)
+    task = asyncio.create_task(countdown(bot, chat_id, msg.message_id, round_id, seconds))
+    panic_tasks[chat_id] = task
 
 
 async def start_game(update, context, mode, difficulty):
     chat_id = update.effective_chat.id
     user = update.effective_user
-
     if chat_id in active:
-        await update.effective_message.reply_text(
-            "🎮 <b>GAME ALREADY RUNNING!</b>\n\n"
-            "Finish it, or press 🛑 END GAME.\n"
-            "No double-game time travel allowed. 😂",
-            parse_mode="HTML",
-        )
+        await update.effective_message.reply_text("🎮 A game is already running. Finish it first or press END GAME.")
         return
-
     ensure_player(chat_id, user.id, user.first_name or "Player")
-    state = {
-        "chat_id": chat_id,
+    active[chat_id] = {
         "mode": mode,
         "difficulty": difficulty,
         "used": set(),
-        "starter": {
-            "id": user.id,
-            "name": user.first_name or "Player",
-        },
+        "starter": {"id": user.id, "name": user.first_name or "Player"},
         "round_no": 0,
-        "status": "loading",
-        "daily": False,
-        "round_id": None,
-        "question": None,
+        "closed": False,
     }
-    active[chat_id] = state
-
     await update.effective_message.reply_text(
-        f"🚀 <b>GAME LOADED</b>\n\n"
-        f"{mode_intro(mode, difficulty)}\n\n"
-        f"<b>RULES</b>\n"
-        f"🏆 First correct answer → XP\n"
-        f"😈 Wrong answer → roasted, but round continues\n"
-        f"⏰ Time over → answer revealed + 0 XP + game ends\n"
-        f"🔀 Questions shuffle automatically\n"
-        f"♻️ No repeat until the selected pool is exhausted\n\n"
-        f"<b>LET THE CHAOS BEGIN.</b> 🔥",
+        f"🚀 <b>GAME LOADED</b>\n\n{mode_intro(mode, difficulty)}\n\n"
+        "<b>Rules:</b>\n• First correct answer gets XP\n• Wrong answers get roasted 😈\n• Timeout reveals the answer and gives 0 XP\n• Timer is stopped before answer reveal\n\n<b>GO.</b>",
         parse_mode="HTML",
     )
-
-    await asyncio.sleep(0.65)
-    if active.get(chat_id) is state:
-        await send_round(context.bot, chat_id, state)
+    await asyncio.sleep(0.8)
+    if chat_id in active:
+        await send_round(context.bot, chat_id, active[chat_id])
 
 
 async def answer(update, context):
     if not update.message or not update.message.text:
         return
-
     chat_id = update.effective_chat.id
     user = update.effective_user
     text = update.message.text
     state = active.get(chat_id)
-
-    # If there is no active game, ordinary chat messages are ignored.
     if not state:
         return
-
-    # While transitioning to the next question, don't accept stale answers.
-    if state.get("status") != "question":
-        await update.message.reply_text(random.choice(LATE_LINES))
+    if state.get("closed"):
         return
-
     q = state.get("question")
     if not q:
         return
@@ -996,35 +965,32 @@ async def answer(update, context):
     correct = any(normalized == normalize(str(x)) for x in expected)
 
     if not correct:
+        # Wrong answers never close the round.
         ensure_player(chat_id, user.id, user.first_name or "Player")
-        await update.message.reply_text(random.choice(ROAST_WRONG))
-
-        # Only the guesser's streak is reset.
+        if random.random() < 0.70:
+            await update.message.reply_text(random.choice(ROAST_WRONG))
+        else:
+            await update.message.reply_text("❌ Wrong! But at least you attacked the question. 😭")
+        # Wrong guesses reset only the guesser's streak, not everybody's.
         con = db()
-        con.execute(
-            "UPDATE players SET streak=0 WHERE chat_id=? AND user_id=?",
-            (chat_id, user.id),
-        )
+        con.execute("UPDATE players SET streak=0 WHERE chat_id=? AND user_id=?", (chat_id, user.id))
         con.commit()
         con.close()
         return
 
-    # Atomic-in-practice state transition happens BEFORE awaits.  Therefore
-    # two people answering at nearly the same moment cannot both get XP.
+    # First correct answer wins. Race protection is performed by closing the state before awaits.
     round_id = state.get("round_id")
-    if not active_is(chat_id, state, round_id):
+    if not active_is(chat_id, round_id):
         await update.message.reply_text(random.choice(LATE_LINES))
         return
-
-    state["status"] = "correct"
-    state["answered_by"] = user.id
+    state["closed"] = True
     cancel_panic_task(chat_id)
+    active.pop(chat_id, None)
 
     name = user.first_name or "Player"
     xp = xp_for(q)
     before = get_player(chat_id, user.id)
     old_level = level_from_xp(before["xp"])
-
     add_result(chat_id, user.id, name, xp=xp, win=True)
     after = get_player(chat_id, user.id)
     new_level = level_from_xp(after["xp"])
@@ -1035,52 +1001,30 @@ async def answer(update, context):
         f"🏆 <b>{html.escape(name)}</b> gets <b>+{xp} XP</b>",
         f"🔥 Streak: <b>{streak}</b>",
     ]
-
     if streak >= 3:
         lines.append(random.choice(STREAK_LINES).format(streak=streak))
-
-    if old_level != new_level:
-        lines.append(
-            f"🎉 <b>LEVEL UP!</b> {old_level} → {new_level} • "
-            f"{html.escape(title_from_level(new_level))}"
-        )
+    if new_level > old_level:
+        lines.append(f"🎉 <b>LEVEL UP!</b> {old_level} → {new_level} • {html.escape(title_from_level(new_level))}")
         if set_achievement(chat_id, user.id, "level_up"):
             lines.append("🏅 Achievement unlocked: <b>LEVEL UP</b>")
-
-    if before["wins"] == 0 and set_achievement(chat_id, user.id, "first_win"):
-        lines.append("🏅 Achievement unlocked: <b>FIRST BLOOD</b>")
-
     if streak >= 5 and set_achievement(chat_id, user.id, "hot_streak"):
         lines.append("🏅 Achievement unlocked: <b>HOT STREAK</b>")
 
-    if state.get("mode") == "CHAOS MODE" and set_achievement(chat_id, user.id, "chaos"):
-        lines.append("🏅 Achievement unlocked: <b>CHAOS SURVIVOR</b>")
-
     if q.get("explain"):
-        lines.append(f"💡 {html.escape(str(q['explain']))}")
-
-    # Daily is deliberately one-shot.
-    if state.get("daily"):
-        active.pop(chat_id, None)
-        if set_achievement(chat_id, user.id, "daily"):
-            lines.append("🏅 Achievement unlocked: <b>DAILY GRINDER</b>")
-        lines.append("\n📅 <b>DAILY COMPLETE!</b> Come back tomorrow.")
-        await update.message.reply_text(
-            "\n".join(lines),
-            reply_markup=main_menu(),
-            parse_mode="HTML",
-        )
-        return
-
-    lines.append("\n⚡ <b>Next round incoming...</b>")
+        lines.append(f"💡 {html.escape(q['explain'])}")
+    lines.append("\n⚡ Next round incoming...")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
-    # Keep THE SAME GAME SESSION alive.  This is the important fix:
-    # active[chat_id] is NOT popped after a correct answer.
-    task = asyncio.create_task(
-        advance_after_correct(context.bot, chat_id, state, round_id)
-    )
-    advance_tasks[chat_id] = task
+    # Daily is one-shot. Normal games continue after a correct answer.
+    if state.get("daily"):
+        return
+    await asyncio.sleep(1.2)
+    if chat_id in active:
+        return
+    # Recreate the same game only if nobody started a different game during the delay.
+    state["closed"] = False
+    active[chat_id] = state
+    await send_round(context.bot, chat_id, state)
 
 # ============================================================
 # COMMANDS
