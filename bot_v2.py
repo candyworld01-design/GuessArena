@@ -406,6 +406,7 @@ async def start_game(update, context, mode="Random", difficulty="Any"):
         "xp": q["xp"],
         "mode": q["mode"],
         "difficulty": q["difficulty"],
+        "panic": mode == "Panic",
     }
 
     keyboard = InlineKeyboardMarkup([
