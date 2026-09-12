@@ -483,6 +483,10 @@ async def start_game(update, context, mode="Random", difficulty="Any"):
         parse_mode="HTML",
         reply_markup=keyboard,
     )
+    if mode == "Panic":
+    await update.effective_message.reply_text(
+        "⚡ PANIC MODE! Sirf 5 seconds! GO! 🔥"
+    )
 
 
 async def game(update: Update, context: ContextTypes.DEFAULT_TYPE):
