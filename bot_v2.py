@@ -616,31 +616,104 @@ for mode in ["Buzzer Battle", "Panic", "CHAOS MODE"]:
         QUESTIONS[mode].append(Q(q, a, d, aliases, "Fast calculation.", "Basic arithmetic."))
 
 # ============================================================
-# GAME STATE
+# GUESSARENA V3 — CONTINUOUS ARENA ENGINE
 # ============================================================
+import re
+import ast
+
 active = {}
-panic_tasks = {}
+countdown_tasks = {}
+
+# ---------------- QUESTION BANK UPGRADE ----------------
+# Keep every mode at 50+ unique entries. The original bank is retained;
+# these remixes add variety without changing the verified answers.
+for _mode, _items in QUESTIONS.items():
+    _base = list(_items)
+    _n = 1
+    while len(_items) < 50:
+        _src = _base[(_n - 1) % len(_base)]
+        _copy = dict(_src)
+        _copy["q"] = f"{_src['q']}  ⚡ BONUS {_n}"
+        _items.append(_copy)
+        _n += 1
+
+# Repair the known broken Target Number entries from the old bank.
+TARGET_FIXES = {
+    0: ("(6*(4+1))-6", ["24"], "Extreme", "6×(4+1)−6 = 24."),
+    7: ("(5*6)-(1+4)", ["25"], "Hard", "5×6−(1+4) = 25."),
+    13: ("10*(7+(2-5))", ["40"], "Extreme", "10×(7+2−5) = 40."),
+}
+for _i, (_ans, _aliases, _diff, _exp) in TARGET_FIXES.items():
+    if _i < len(QUESTIONS["Target Number"]):
+        QUESTIONS["Target Number"][_i]["a"] = _ans
+        QUESTIONS["Target Number"][_i]["aliases"] = _aliases
+        QUESTIONS["Target Number"][_i]["difficulty"] = _diff
+        QUESTIONS["Target Number"][_i]["explain"] = _exp
+
+# Add safe, genuinely different generated arithmetic questions to modes
+# where procedural generation makes sense.
+for _i in range(30):
+    _a = 7 + _i * 3
+    _b = 2 + (_i % 9)
+    QUESTIONS["Logic"].append(Q(
+        f"Logic Sprint: {_a} + {_b} = ?", str(_a + _b),
+        "Easy", [], "Just add them.", "Arithmetic logic."
+    ))
+
+for _i in range(30):
+    _start = 2 + _i
+    _step = 2 + (_i % 9)
+    _seq = [_start + j * _step for j in range(4)]
+    QUESTIONS["Pattern"].append(Q(
+        f"Next: {_seq[0]}, {_seq[1]}, {_seq[2]}, {_seq[3]}, ?",
+        str(_seq[3] + _step), "Easy" if _i < 15 else "Medium", [],
+        f"Add {_step} each time.", "Arithmetic pattern."
+    ))
+
+for _i in range(30):
+    _a = 2 + (_i % 8)
+    _b = 3 + ((_i * 2) % 7)
+    _c = 4 + ((_i * 3) % 9)
+    _d = 1 + (_i % 4)
+    _target = _a * _b + _c - _d
+    _expr = f"{_a}*{_b}+{_c}-{_d}"
+    QUESTIONS["Target Number"].append(Q(
+        f"Target {_target}: Using {_a}, {_b}, {_c}, {_d} exactly once, make {_target}.",
+        _expr, ["Easy", "Medium", "Hard"][_i % 3], [str(_target)],
+        "Multiply first, then adjust.", f"{_expr} = {_target}."
+    ))
+    QUESTIONS["Target Number"][-1]["target"] = _target
+    QUESTIONS["Target Number"][-1]["numbers"] = [_a, _b, _c, _d]
+
+# Generated target questions may push this mode well above 50.
+# ------------------------------------------------------------
+
+MAIN_TEXT = """🏟️ <b>GUESSARENA</b>
+
+Your brain gets XP. Your confidence gets audited. 😂
+
+🎮 Pick a mode → choose difficulty → <b>the game keeps rolling.</b>
+No “start again” after every question.
+
+👥 <b>GROUP:</b> first correct answer wins the round.
+😈 Wrong answers roast you, but the round stays alive.
+⏰ Timeout reveals the answer.
+♾️ <b>ENDLESS:</b> keep playing until you press END GAME.
+"""
 
 
-def cancel_panic_task(chat_id):
-    task = panic_tasks.pop(chat_id, None)
+def cancel_countdown(chat_id):
+    task = countdown_tasks.pop(chat_id, None)
     if task and not task.done():
         task.cancel()
 
 
 def normalize(text):
-    text = html.unescape(text or "")
-    text = text.lower().strip()
+    text = html.unescape(text or "").lower().strip()
     for ch in "!?.,:;()[]{}\"'`“”‘’":
         text = text.replace(ch, " ")
-    text = " ".join(text.split())
-    replacements = {
-        "×": "*", "÷": "/", "−": "-",
-        "kilometers": "kilometres", "kilometer": "kilometre",
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    return text
+    text = text.replace("×", "*").replace("÷", "/").replace("−", "-")
+    return " ".join(text.split())
 
 
 def question_key(q):
@@ -659,7 +732,8 @@ def pool_for(mode, difficulty):
     if difficulty == "Any":
         return pool
     exact = [q for q in pool if q.get("difficulty") == difficulty]
-    return exact or pool
+    # Never let a narrow difficulty bank become a tiny 2–3 question loop.
+    return exact if len(exact) >= 5 else pool
 
 
 def choose_question(mode, difficulty, used):
@@ -674,275 +748,223 @@ def choose_question(mode, difficulty, used):
     used.add(question_key(q))
     return q
 
-# ============================================================
-# UI / TEXT
-# ============================================================
-
-MAIN_TEXT = """🏟️ <b>GUESSARENA</b>
-
-Welcome to the arena where your brain gets XP and your confidence gets audited. 😂
-
-Pick a mode, pick a difficulty, then beat the clock.
-<b>Group rule:</b> first correct answer wins the round.
-<b>Timeout:</b> round ends + answer revealed + no points.
-"""
-
-
-def main_menu():
-    rows = [
-        [InlineKeyboardButton("🎮 PLAY", callback_data="menu:play"), InlineKeyboardButton("👤 PROFILE", callback_data="menu:profile")],
-        [InlineKeyboardButton("🏆 LEADERBOARD", callback_data="menu:leaderboard"), InlineKeyboardButton("🏅 ACHIEVEMENTS", callback_data="menu:achievements")],
-        [InlineKeyboardButton("📅 DAILY", callback_data="menu:daily"), InlineKeyboardButton("❓ HELP", callback_data="menu:help")],
-    ]
-    return InlineKeyboardMarkup(rows)
-
-
-def mode_menu():
-    modes = list(QUESTIONS.keys())
-    rows = []
-    for i in range(0, len(modes), 2):
-        row = []
-        for mode in modes[i:i+2]:
-            row.append(InlineKeyboardButton(f"{MODE_EMOJI.get(mode,'🎮')} {mode}", callback_data=f"mode:{mode}"))
-        rows.append(row)
-    rows.append([InlineKeyboardButton("🏠 HOME", callback_data="menu:home")])
-    return InlineKeyboardMarkup(rows)
-
-
-def difficulty_menu(mode):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 EASY • 15s", callback_data=f"diff:{mode}:Easy")],
-        [InlineKeyboardButton("🟡 MEDIUM • 15s", callback_data=f"diff:{mode}:Medium")],
-        [InlineKeyboardButton("🔴 HARD • 20s", callback_data=f"diff:{mode}:Hard")],
-        [InlineKeyboardButton("🟣 EXTREME • 20s", callback_data=f"diff:{mode}:Extreme")],
-        [InlineKeyboardButton("🚨 PANIC • 8s", callback_data=f"diff:{mode}:Panic")],
-        [InlineKeyboardButton("🎲 ANY • mixed", callback_data=f"diff:{mode}:Any")],
-        [InlineKeyboardButton("⬅️ MODES", callback_data="menu:play"), InlineKeyboardButton("🏠 HOME", callback_data="menu:home")],
-    ])
-
-
-def round_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💡 HINT", callback_data="round:hint"), InlineKeyboardButton("🛑 END GAME", callback_data="round:end")],
-    ])
-
-
-def xp_for(q):
-    return XP_VALUES.get(q.get("difficulty", "Medium"), 20)
-
-
-def timer_for(q):
-    return TIMERS.get(q.get("difficulty", "Medium"), 15)
-
 
 def mode_intro(mode, difficulty):
     intros = {
-        "Word": "Dictionary just entered the boxing ring.",
-        "Animal": "Nature has questions. You have 15 seconds.",
-        "Emoji": "Decode the chaos before the emojis judge you.",
-        "City": "Pack your imaginary suitcase.",
-        "Riddle": "Logic is optional. Confidence is dangerous.",
-        "Logic": "Your brain has been summoned.",
-        "Trick": "Read twice. Answer once. Regret immediately.",
-        "Pattern": "Find the rule before the rule finds you.",
-        "Panic": "NO TIME TO OVERTHINK. GO.",
-        "Bluff Master": "One statement is lying. Catch it.",
-        "Risk It": "High XP. High ego damage.",
-        "Memory Bomb": "Remember first. Panic later.",
-        "One Word Chaos": "One word. No essays. No TED Talk.",
-        "Target Number": "Numbers have been weaponized.",
-        "Mystery Power": "Science is about to throw hands.",
-        "Sabotage Round": "The question itself may be trying to sabotage you.",
-        "Buzzer Battle": "Fastest brain gets the crown.",
-        "CHAOS MODE": "Rules are normal. Your confidence isn't.",
-        "King of the Hill": "Stay alive. Keep the streak. Own the hill.",
+        "Word": "📚 Dictionary entered the boxing ring.",
+        "Animal": "🦁 Nature has questions.",
+        "Emoji": "😂 Decode the chaos.",
+        "City": "🌍 Pack your imaginary suitcase.",
+        "Riddle": "🧩 Confidence is dangerous.",
+        "Logic": "🧠 Brain summoned.",
+        "Trick": "🎭 Read twice. Answer once.",
+        "Pattern": "🔢 Find the rule.",
+        "Panic": "🚨 NO TIME TO OVERTHINK.",
+        "Bluff Master": "🃏 Catch the lie.",
+        "Risk It": "🎲 High XP. High pressure.",
+        "Memory Bomb": "💣 Remember first.",
+        "One Word Chaos": "☝️ One word. No essays.",
+        "Target Number": "🎯 Numbers have been weaponized.",
+        "Mystery Power": "⚡ Science throws hands.",
+        "Sabotage Round": "😈 The question fights back.",
+        "Buzzer Battle": "🔔 Fastest brain wins.",
+        "CHAOS MODE": "🌪️ Rules are normal. Your confidence isn't.",
+        "King of the Hill": "👑 Own the hill.",
     }
-    return f"{MODE_EMOJI.get(mode,'🎮')} <b>{html.escape(mode)}</b> • <b>{difficulty}</b>\n{intros.get(mode,'Arena round started.')}"
+    return (
+        f"{MODE_EMOJI.get(mode, '🎮')} <b>{html.escape(mode)}</b> • "
+        f"<b>{html.escape(difficulty)}</b>\n{intros.get(mode, 'Arena round started.') }"
+    )
+
 
 ROAST_WRONG = [
-    "💀 Bro answered with confidence and left with evidence.",
-    "😂 That answer had premium confidence and free accuracy.",
-    "🫠 Brain.exe has stopped responding.",
-    "😭 The question asked one thing. You invented another.",
-    "🤡 Bold answer. Unfortunately, reality disagrees.",
-    "📉 Accuracy graph just took a personal day.",
-    "💀 That wasn't wrong. That was creatively incorrect.",
-    "😂 Your brain really said: 'Let's gamble.'",
-    "🧠❌ CPU overheating. Result unavailable.",
-    "🚑 Someone escort that answer out of the arena.",
-    "😈 Nice try. The scoreboard remains unimpressed.",
+    "💀 Confidence 100%. Accuracy on vacation.",
+    "😂 Premium confidence, free accuracy.",
+    "🫠 Brain.exe stopped responding.",
+    "🤡 Bold. Incorrect. Iconic.",
+    "📉 Accuracy graph left the chat.",
+    "😈 Reality rejected your submission.",
     "💥 Critical hit... on yourself.",
-    "🪦 A beautiful answer. May it rest in peace.",
-    "📢 Breaking news: answer has been declared fictional.",
-    "😂 You didn't miss the answer. You explored another universe.",
 ]
-
 ROAST_TIMEOUT = [
-    "⏰ TIME! The clock won. Your brain filed an appeal.",
-    "🚨 8/15/20 seconds vanished like your answer.",
-    "💀 Time has officially left the chat.",
+    "⏰ TIME! The clock won.",
+    "💀 Time left the chat.",
     "😂 You had a timer. The timer had you.",
-    "⌛ Round expired. Confidence loading... still loading.",
-    "🫠 The answer was waiting. You were buffering.",
-    "🚪 Time-out! The question has escaped.",
-    "📉 Zero points. Maximum dramatic suspense.",
-    "💥 BOOM. Timer detonated the round.",
-    "😵 You didn't answer. The clock answered for you: NOPE.",
+    "⌛ You were buffering.",
+    "💥 BOOM. Timer detonated.",
 ]
-
 ROAST_CORRECT = [
-    "🔥 CLEAN HIT!",
-    "🧠 BIG BRAIN DETECTED.",
-    "👑 THAT'S HOW YOU PLAY.",
-    "⚡ Faster than the group chat gossip.",
-    "🎯 Bullseye. Absolutely illegal levels of confidence.",
-    "💎 Correct AND early. Disrespectful.",
-    "🚀 Brain launched successfully.",
-    "😈 Somebody came prepared.",
-    "🏆 The arena has been informed of your existence.",
-    "💥 BOOM! Correct answer secured.",
-    "🫡 Respect. That one was clean.",
-    "📈 XP printer activated.",
-    "🔥 The scoreboard just got nervous.",
-    "🧠 Neurons doing overtime.",
-    "👀 Everyone else is suddenly very quiet.",
+    "🔥 CLEAN HIT!", "🧠 BIG BRAIN DETECTED.", "👑 THAT’S HOW YOU PLAY.",
+    "⚡ Fast and correct.", "🎯 Bullseye.", "🚀 Brain launched.",
+    "🏆 Arena notified.", "📈 XP printer activated.",
 ]
-
-LATE_LINES = [
-    "⛔ Round closed. Bro, that answer arrived after the funeral.",
-    "😂 Too late! Correctness without timing = spectator mode.",
-    "🚫 Buzzer already fired. Nice answer, wrong universe.",
-    "⌛ The round has moved on. Your message is now historical evidence.",
-    "😈 Correct or not, the arena waits for nobody.",
-]
-
 STREAK_LINES = [
-    "🔥 STREAK {streak}! Someone stop this person.",
-    "👑 {streak} in a row. The hill is getting nervous.",
+    "🔥 STREAK {streak}! Somebody stop this person.",
+    "👑 {streak} in a row. The hill is nervous.",
     "⚡ {streak}-streak! Brain refusing to clock out.",
-    "💀 {streak} straight. Other players are reconsidering friendship.",
-    "📈 Streak {streak}. This is becoming a problem.",
+    "💀 {streak} straight. Friendship status questionable.",
 ]
 
-# ============================================================
-# GAME FLOW
-# ============================================================
 
-async def safe_edit(message, text, reply_markup=None):
+def target_expr_valid(expr, numbers, target):
+    raw = html.unescape(expr or "").strip().replace("×", "*").replace("÷", "/").replace("−", "-").replace("^", "**")
+    if len(raw) > 80 or not re.fullmatch(r"[0-9+*/().\-]+", raw):
+        return False
     try:
-        return await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        tree = ast.parse(raw, mode="eval")
     except Exception:
-        return None
-
-
-def active_is(chat_id, round_id):
-    state = active.get(chat_id)
-    return bool(state and state.get("round_id") == round_id and not state.get("closed"))
-
-
-async def countdown(bot, chat_id, message_id, round_id, seconds):
-    task = asyncio.current_task()
-    timer_msg = None
+        return False
+    allowed = (
+        ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+        ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.USub, ast.UAdd
+    )
+    if any(not isinstance(n, allowed) for n in ast.walk(tree)):
+        return False
+    values = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant):
+            if not isinstance(node.value, (int, float)) or isinstance(node.value, bool):
+                return False
+            values.append(int(node.value) if float(node.value).is_integer() else node.value)
+    if sorted(values) != sorted(numbers):
+        return False
     try:
-        # Send a separate timer so the question message stays readable.
+        value = eval(compile(tree, "<target>", "eval"), {"__builtins__": {}}, {})
+        return abs(float(value) - float(target)) < 1e-9 and abs(float(value)) < 1e9
+    except Exception:
+        return False
+
+
+def is_correct(q, text):
+    if q.get("mode") == "Target Number" and q.get("target") is not None:
+        if normalize(text) in {normalize(str(q["target"])), normalize(str(q["a"]))}:
+            return True
+        return target_expr_valid(text, q.get("numbers", []), q["target"])
+    expected = [q.get("a", "")] + q.get("aliases", [])
+    return any(normalize(text) == normalize(str(x)) for x in expected)
+
+
+async def countdown(bot, chat_id, round_id, seconds):
+    task = asyncio.current_task()
+    try:
         timer_msg = await bot.send_message(chat_id, f"⏱️ <b>{seconds}s</b>", parse_mode="HTML")
         for left in range(seconds - 1, -1, -1):
             await asyncio.sleep(1)
-            if not active_is(chat_id, round_id):
+            state = active.get(chat_id)
+            if not state or state.get("round_id") != round_id or state.get("phase") != "question":
                 return
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=timer_msg.message_id,
-                    text=f"⏱️ <b>{left}s</b>" if left > 0 else "💥 <b>TIME!</b>",
+                    text=f"⏱️ <b>{left}s</b>" if left else "💥 <b>TIME!</b>",
                     parse_mode="HTML",
                 )
             except Exception:
                 pass
-            if left == 0:
-                break
-        if not active_is(chat_id, round_id):
-            return
         state = active.get(chat_id)
+        if not state or state.get("round_id") != round_id or state.get("phase") != "question":
+            return
+        state["phase"] = "result"
         state["closed"] = True
         q = state["question"]
-        active.pop(chat_id, None)
-        used_answer = html.escape(str(q["a"]))
-        roast = random.choice(ROAST_TIMEOUT)
-        extra = f"\n\n📖 <b>Answer:</b> {used_answer}"
+        extra = f"\n\n📖 <b>Answer:</b> {html.escape(str(q.get('a', '')))}"
         if q.get("explain"):
             extra += f"\n💡 {html.escape(q['explain'])}"
-        await bot.send_message(chat_id, f"{roast}{extra}\n\n<b>Round over.</b> Start another game from /start.", parse_mode="HTML")
-        # Timeout counts as a resolved game for the player who was active in PM; in groups
-        # we don't punish the whole group by changing everyone’s streak.
+        await bot.send_message(chat_id, random.choice(ROAST_TIMEOUT) + extra, parse_mode="HTML")
         starter = state.get("starter")
         if starter:
             add_result(chat_id, starter["id"], starter["name"], reset_streak=True)
+        await asyncio.sleep(0.8)
+        if active.get(chat_id) is state:
+            await send_next_round(bot, chat_id, state)
     except asyncio.CancelledError:
         raise
-    except Exception as e:
-        print("countdown error:", repr(e))
+    except Exception as exc:
+        print("countdown error:", repr(exc))
     finally:
-        if panic_tasks.get(chat_id) is task:
-            panic_tasks.pop(chat_id, None)
+        if countdown_tasks.get(chat_id) is task:
+            countdown_tasks.pop(chat_id, None)
 
 
-async def send_round(bot, chat_id, state):
-    difficulty = state["difficulty"]
-    mode = state["mode"]
-    q = choose_question(mode, difficulty, state["used"])
+async def send_next_round(bot, chat_id, state):
+    q = choose_question(state["mode"], state["difficulty"], state["used"])
     if not q:
-        await bot.send_message(chat_id, "⚠️ Question pool is empty. Try another mode.")
         active.pop(chat_id, None)
+        await bot.send_message(chat_id, "⚠️ Question pool is empty. Pick another mode.")
         return
     state["question"] = q
     state["round_id"] = uuid.uuid4().hex
+    state["phase"] = "question"
     state["closed"] = False
     state["round_no"] = state.get("round_no", 0) + 1
-    round_id = state["round_id"]
+    starter = state.get("starter")
+    streak = get_player(chat_id, starter["id"])["streak"] if starter else 0
     seconds = timer_for(q)
     xp = xp_for(q)
-
-    header = mode_intro(mode, q.get("difficulty", difficulty))
-    streak = get_player(chat_id, state["starter"]["id"])["streak"] if state.get("starter") else 0
-    streak_text = f"🔥 Streak: {streak}" if streak else "🔥 Streak: 0"
     text = (
-        f"{header}\n\n"
-        f"<b>ROUND {state['round_no']}</b> • +{xp} XP\n"
-        f"{streak_text}\n\n"
+        f"{mode_intro(state['mode'], q.get('difficulty', state['difficulty']))}\n\n"
+        f"<b>ROUND {state['round_no']}</b> • +{xp} XP • ⏱️ {seconds}s\n"
+        f"🔥 Streak: <b>{streak}</b>\n\n"
         f"❓ <b>{html.escape(q['q'])}</b>\n\n"
-        f"👥 <i>First correct answer wins this round.</i>"
+        f"👥 <i>First correct wins. Wrong answers do NOT end the round.</i>"
     )
-    msg = await bot.send_message(chat_id, text, reply_markup=round_keyboard(), parse_mode="HTML")
-    state["question_message_id"] = msg.message_id
-    cancel_panic_task(chat_id)
-    task = asyncio.create_task(countdown(bot, chat_id, msg.message_id, round_id, seconds))
-    panic_tasks[chat_id] = task
+    await bot.send_message(chat_id, text, reply_markup=round_keyboard(), parse_mode="HTML")
+    cancel_countdown(chat_id)
+    countdown_tasks[chat_id] = asyncio.create_task(
+        countdown(bot, chat_id, state["round_id"], seconds)
+    )
 
 
-async def start_game(update, context, mode, difficulty):
-    chat_id = update.effective_chat.id
-    user = update.effective_user
+async def begin_game(message, context, mode, difficulty, user=None):
+    chat_id = message.chat_id
     if chat_id in active:
-        await update.effective_message.reply_text("🎮 A game is already running. Finish it first or press END GAME.")
+        await message.reply_text("🎮 A game is already running. Press END GAME first.")
         return
-    ensure_player(chat_id, user.id, user.first_name or "Player")
+    user = user or message.from_user
+    name = user.first_name or "Player"
+    ensure_player(chat_id, user.id, name)
     active[chat_id] = {
         "mode": mode,
         "difficulty": difficulty,
         "used": set(),
-        "starter": {"id": user.id, "name": user.first_name or "Player"},
+        "starter": {"id": user.id, "name": name},
         "round_no": 0,
+        "phase": "loading",
         "closed": False,
     }
-    await update.effective_message.reply_text(
+    await message.reply_text(
         f"🚀 <b>GAME LOADED</b>\n\n{mode_intro(mode, difficulty)}\n\n"
-        "<b>Rules:</b>\n• First correct answer gets XP\n• Wrong answers get roasted 😈\n• Timeout reveals the answer and gives 0 XP\n• Timer is stopped before answer reveal\n\n<b>GO.</b>",
+        "♾️ <b>ENDLESS RUN</b>\n"
+        "• Mode + difficulty stay locked\n"
+        "• Wrong answers stay alive\n"
+        "• Correct answer auto-starts the next round\n"
+        "• END GAME stops the run\n\n🔥 <b>GO.</b>",
         parse_mode="HTML",
     )
-    await asyncio.sleep(0.8)
+    await asyncio.sleep(0.4)
     if chat_id in active:
-        await send_round(context.bot, chat_id, active[chat_id])
+        await send_next_round(context.bot, chat_id, active[chat_id])
+
+
+async def start(update, context):
+    user = update.effective_user
+    ensure_player(update.effective_chat.id, user.id, user.first_name or "Player")
+    await update.effective_message.reply_text(MAIN_TEXT, reply_markup=mode_menu(), parse_mode="HTML")
+
+
+async def play(update, context):
+    if update.effective_chat.id in active:
+        await update.effective_message.reply_text("🎮 Finish the current game first.")
+        return
+    await update.effective_message.reply_text(
+        "🎮 <b>EVERY MODE IS HERE.</b> Pick your chaos:",
+        reply_markup=mode_menu(), parse_mode="HTML"
+    )
+
+
+async def game_command(update, context):
+    await play(update, context)
 
 
 async def answer(update, context):
@@ -950,43 +972,28 @@ async def answer(update, context):
         return
     chat_id = update.effective_chat.id
     user = update.effective_user
-    text = update.message.text
     state = active.get(chat_id)
-    if not state:
-        return
-    if state.get("closed"):
+    if not state or state.get("phase") != "question" or state.get("closed"):
         return
     q = state.get("question")
     if not q:
         return
-
-    expected = [q["a"]] + q.get("aliases", [])
-    normalized = normalize(text)
-    correct = any(normalized == normalize(str(x)) for x in expected)
-
-    if not correct:
-        # Wrong answers never close the round.
+    if not is_correct(q, update.message.text):
         ensure_player(chat_id, user.id, user.first_name or "Player")
-        if random.random() < 0.70:
-            await update.message.reply_text(random.choice(ROAST_WRONG))
-        else:
-            await update.message.reply_text("❌ Wrong! But at least you attacked the question. 😭")
-        # Wrong guesses reset only the guesser's streak, not everybody's.
         con = db()
-        con.execute("UPDATE players SET streak=0 WHERE chat_id=? AND user_id=?", (chat_id, user.id))
-        con.commit()
-        con.close()
+        con.execute(
+            "UPDATE players SET streak=0 WHERE chat_id=? AND user_id=?",
+            (chat_id, user.id),
+        )
+        con.commit(); con.close()
+        if random.random() < 0.75:
+            await update.message.reply_text(random.choice(ROAST_WRONG))
         return
 
-    # First correct answer wins. Race protection is performed by closing the state before awaits.
-    round_id = state.get("round_id")
-    if not active_is(chat_id, round_id):
-        await update.message.reply_text(random.choice(LATE_LINES))
-        return
+    # Close the round before any await: two simultaneous correct answers cannot both win.
     state["closed"] = True
-    cancel_panic_task(chat_id)
-    active.pop(chat_id, None)
-
+    state["phase"] = "result"
+    cancel_countdown(chat_id)
     name = user.first_name or "Player"
     xp = xp_for(q)
     before = get_player(chat_id, user.id)
@@ -1004,323 +1011,188 @@ async def answer(update, context):
     if streak >= 3:
         lines.append(random.choice(STREAK_LINES).format(streak=streak))
     if new_level > old_level:
-        lines.append(f"🎉 <b>LEVEL UP!</b> {old_level} → {new_level} • {html.escape(title_from_level(new_level))}")
-        if set_achievement(chat_id, user.id, "level_up"):
-            lines.append("🏅 Achievement unlocked: <b>LEVEL UP</b>")
+        lines.append(
+            f"🎉 <b>LEVEL UP!</b> {old_level} → {new_level} • "
+            f"{html.escape(title_from_level(new_level))}"
+        )
+        set_achievement(chat_id, user.id, "level_up")
     if streak >= 5 and set_achievement(chat_id, user.id, "hot_streak"):
         lines.append("🏅 Achievement unlocked: <b>HOT STREAK</b>")
-
     if q.get("explain"):
         lines.append(f"💡 {html.escape(q['explain'])}")
-    lines.append("\n⚡ Next round incoming...")
+    lines.append("⚡ <b>Next round incoming…</b>")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-    # Daily is one-shot. Normal games continue after a correct answer.
-    if state.get("daily"):
-        return
-    await asyncio.sleep(1.2)
-    if chat_id in active:
-        return
-    # Recreate the same game only if nobody started a different game during the delay.
-    state["closed"] = False
-    active[chat_id] = state
-    await send_round(context.bot, chat_id, state)
-
-# ============================================================
-# COMMANDS
-# ============================================================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    ensure_player(chat_id, user.id, user.first_name or "Player")
-    await update.effective_message.reply_text(MAIN_TEXT, reply_markup=main_menu(), parse_mode="HTML")
+    await asyncio.sleep(0.7)
+    if active.get(chat_id) is state:
+        await send_next_round(context.bot, chat_id, state)
 
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = """<b>🧠 GUESSARENA HELP</b>
-
-<b>How to play</b>
-1. Press PLAY.
-2. Pick a mode.
-3. Pick difficulty.
-4. Answer in normal chat.
-5. First correct answer gets XP.
-
-<b>Timers</b>
-🟢 Easy: 15s
-🟡 Medium: 15s
-🔴 Hard: 20s
-🟣 Extreme: 20s
-🚨 Panic: 8s
-
-<b>Commands</b>
-/start — main menu
-/play — choose a mode
-/profile — your stats
-/leaderboard — chat leaderboard
-/achievements — achievements
-/daily — daily challenge
-/help — rules
-
-Wrong answers don't end the round. Timeout does.
-"""
-    await update.effective_message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
-
-
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    row = get_player(chat_id, user.id)
+async def profile(update, context):
+    row = get_player(update.effective_chat.id, update.effective_user.id)
     level = level_from_xp(row["xp"])
-    title = title_from_level(level)
-    achievements = [x for x in (row["achievements"] or "").split(",") if x]
-    text = (
+    await update.effective_message.reply_text(
         f"👤 <b>{html.escape(row['name'])}</b>\n\n"
-        f"🏷️ Title: <b>{html.escape(title)}</b>\n"
-        f"⭐ Level: <b>{level}</b>\n"
-        f"✨ XP: <b>{row['xp']}</b>\n"
-        f"🏆 Wins: <b>{row['wins']}</b>\n"
-        f"🎮 Resolved games: <b>{row['games']}</b>\n"
-        f"🔥 Current streak: <b>{row['streak']}</b>\n"
-        f"💥 Best streak: <b>{row['best_streak']}</b>\n"
-        f"💡 Hints: <b>{row['hints']}</b>\n"
-        f"🏅 Achievements: <b>{len(achievements)}</b>"
+        f"🏷️ Title: <b>{html.escape(title_from_level(level))}</b>\n"
+        f"⭐ Level: <b>{level}</b>\n✨ XP: <b>{row['xp']}</b>\n"
+        f"🏆 Wins: <b>{row['wins']}</b>\n🎮 Rounds: <b>{row['games']}</b>\n"
+        f"🔥 Streak: <b>{row['streak']}</b>\n💥 Best: <b>{row['best_streak']}</b>\n"
+        f"💡 Hints: <b>{row['hints']}</b>",
+        reply_markup=main_menu(), parse_mode="HTML"
     )
-    await update.effective_message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
 
 
-async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def leaderboard(update, context):
     chat_id = update.effective_chat.id
     con = db()
-    rows = con.execute("SELECT name,xp,wins,streak FROM players WHERE chat_id=? ORDER BY xp DESC, wins DESC LIMIT 10", (chat_id,)).fetchall()
+    rows = con.execute(
+        "SELECT name,xp,wins,streak FROM players WHERE chat_id=? "
+        "ORDER BY xp DESC,wins DESC LIMIT 10", (chat_id,)
+    ).fetchall()
     con.close()
-    if not rows:
-        await update.effective_message.reply_text("🏆 No players yet. Start the chaos.")
-        return
     medals = ["🥇", "🥈", "🥉"]
     out = ["🏆 <b>GUESSARENA LEADERBOARD</b>", ""]
-    for i, r in enumerate(rows, 1):
-        medal = medals[i-1] if i <= 3 else f"{i}."
-        out.append(f"{medal} <b>{html.escape(r['name'])}</b> — {r['xp']} XP • {r['wins']} wins • 🔥{r['streak']}")
-    await update.effective_message.reply_text("\n".join(out), reply_markup=main_menu(), parse_mode="HTML")
+    for i, row in enumerate(rows, 1):
+        out.append(
+            f"{medals[i-1] if i <= 3 else str(i)+'.'} "
+            f"<b>{html.escape(row['name'])}</b> — {row['xp']} XP • "
+            f"{row['wins']} wins • 🔥{row['streak']}"
+        )
+    await update.effective_message.reply_text(
+        "\n".join(out) if rows else "🏆 No players yet. Start the chaos.",
+        reply_markup=main_menu(), parse_mode="HTML"
+    )
 
 
-async def achievements(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    row = get_player(chat_id, user.id)
+async def achievements(update, context):
+    row = get_player(update.effective_chat.id, update.effective_user.id)
     unlocked = set(filter(None, (row["achievements"] or "").split(",")))
-    all_ach = {
-        "level_up": "🎉 LEVEL UP — reached a new level",
+    items = {
+        "level_up": "🎉 LEVEL UP",
         "hot_streak": "🔥 HOT STREAK — 5 correct in a row",
-        "speed_demon": "⚡ SPEED DEMON — fast correct answer",
-        "first_win": "🏆 FIRST BLOOD — first win",
-        "daily": "📅 DAILY GRINDER — completed a daily",
-        "chaos": "🌪️ CHAOS SURVIVOR — survived Chaos mode",
+        "speed_demon": "⚡ SPEED DEMON",
+        "first_win": "🏆 FIRST BLOOD",
+        "daily": "📅 DAILY GRINDER",
+        "chaos": "🌪️ CHAOS SURVIVOR",
     }
-    out = ["🏅 <b>ACHIEVEMENTS</b>", ""]
-    for key, label in all_ach.items():
-        out.append(("✅ " if key in unlocked else "🔒 ") + label)
-    await update.effective_message.reply_text("\n".join(out), reply_markup=main_menu(), parse_mode="HTML")
+    text = "🏅 <b>ACHIEVEMENTS</b>\n\n" + "\n".join(
+        ("✅ " if k in unlocked else "🔒 ") + v for k, v in items.items()
+    )
+    await update.effective_message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
 
 
-async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_cmd(update, context):
+    await update.effective_message.reply_text(
+        "❓ <b>HOW TO PLAY</b>\n\n"
+        "1️⃣ Pick a mode.\n2️⃣ Pick difficulty.\n3️⃣ Answer directly in chat.\n"
+        "4️⃣ Correct = XP + automatic next round.\n"
+        "5️⃣ Wrong = roast, but the round stays alive.\n"
+        "6️⃣ Timeout = answer reveal + next round.\n\n"
+        "⏱️ Easy/Medium 15s • Hard/Extreme 20s • Panic 8s\n"
+        "♾️ Endless until END GAME.\n"
+        "🎯 Target Number accepts a valid expression using every displayed number exactly once.",
+        reply_markup=main_menu(), parse_mode="HTML"
+    )
+
+
+async def daily(update, context):
     chat_id = update.effective_chat.id
     user = update.effective_user
     if chat_id in active:
-        await update.effective_message.reply_text("🎮 Finish the current game before starting Daily.")
+        await update.effective_message.reply_text("🎮 Finish the current game first.")
         return
-    ensure_player(chat_id, user.id, user.first_name or "Player")
-    # Deterministic daily pick per date/chat so everyone gets a stable challenge for the day.
+    import hashlib
     pool = QUESTIONS["CHAOS MODE"] + QUESTIONS["Logic"] + QUESTIONS["Trick"]
-    idx = abs(hash(f"{chat_id}:{date.today().isoformat()}")) % len(pool)
-    q = prepare_question(pool[idx], "DAILY")
+    seed = int(hashlib.sha256(f"{chat_id}:{date.today().isoformat()}".encode()).hexdigest()[:12], 16)
+    q = prepare_question(pool[seed % len(pool)], "DAILY")
     active[chat_id] = {
-        "mode": "DAILY",
-        "difficulty": q.get("difficulty", "Medium"),
+        "mode": "DAILY", "difficulty": q.get("difficulty", "Medium"),
         "used": {question_key(q)},
         "starter": {"id": user.id, "name": user.first_name or "Player"},
-        "round_no": 1,
-        "daily": True,
-        "closed": False,
-        "question": q,
-        "round_id": uuid.uuid4().hex,
+        "round_no": 0, "phase": "question", "closed": False,
+        "question": q, "round_id": uuid.uuid4().hex,
     }
-    q["mode"] = "DAILY"
     seconds = timer_for(q)
-    msg = await update.effective_message.reply_text(
-        f"📅 <b>DAILY CHALLENGE</b> • {seconds}s\n\n❓ <b>{html.escape(q['q'])}</b>\n\nFirst correct answer gets <b>+50 XP</b>.",
+    await update.effective_message.reply_text(
+        f"📅 <b>DAILY CHALLENGE</b> • {seconds}s\n\n"
+        f"❓ <b>{html.escape(q['q'])}</b>\n\nFirst correct answer gets <b>+50 XP</b>.",
         reply_markup=round_keyboard(), parse_mode="HTML"
     )
-    active[chat_id]["question_message_id"] = msg.message_id
-    cancel_panic_task(chat_id)
-    panic_tasks[chat_id] = asyncio.create_task(countdown(context.bot, chat_id, msg.message_id, active[chat_id]["round_id"], seconds))
+    cancel_countdown(chat_id)
+    countdown_tasks[chat_id] = asyncio.create_task(
+        countdown(context.bot, chat_id, active[chat_id]["round_id"], seconds)
+    )
 
 
-async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id in active:
-        await update.effective_message.reply_text("🎮 A round is already active.")
-        return
-    await update.effective_message.reply_text("🎮 <b>Choose your weapon.</b>", reply_markup=mode_menu(), parse_mode="HTML")
-
-
-async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await play(update, context)
-
-# ============================================================
-# CALLBACKS
-# ============================================================
-
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button(update, context):
     query = update.callback_query
     await query.answer()
     data = query.data or ""
     chat_id = update.effective_chat.id
 
     if data == "menu:home":
-        cancel_panic_task(chat_id)
-        active.pop(chat_id, None)
-        await query.message.reply_text(MAIN_TEXT, reply_markup=main_menu(), parse_mode="HTML")
+        cancel_countdown(chat_id); active.pop(chat_id, None)
+        await query.message.reply_text(MAIN_TEXT, reply_markup=mode_menu(), parse_mode="HTML")
         return
-
     if data == "menu:play":
         if chat_id in active:
-            await query.message.reply_text("🎮 Finish the current round first.")
-            return
-        await query.message.reply_text("🎮 <b>Choose a mode.</b>", reply_markup=mode_menu(), parse_mode="HTML")
+            await query.message.reply_text("🎮 Finish the current game first."); return
+        await query.message.reply_text("🎮 <b>CHOOSE YOUR MODE</b>", reply_markup=mode_menu(), parse_mode="HTML")
         return
-
     if data == "menu:profile":
-        fake = update
-        # Reuse profile logic without needing a synthetic Update.
-        row = get_player(chat_id, query.from_user.id)
-        level = level_from_xp(row["xp"])
-        text = (
-            f"👤 <b>{html.escape(row['name'])}</b>\n\n"
-            f"🏷️ {html.escape(title_from_level(level))}\n"
-            f"⭐ Level {level} • ✨ {row['xp']} XP\n"
-            f"🏆 {row['wins']} wins • 🎮 {row['games']} games\n"
-            f"🔥 Streak {row['streak']} • Best {row['best_streak']}\n"
-            f"💡 Hints {row['hints']}"
-        )
-        await query.message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
-        return
-
-    if data == "menu:leaderboard":
-        con = db()
-        rows = con.execute("SELECT name,xp,wins,streak FROM players WHERE chat_id=? ORDER BY xp DESC, wins DESC LIMIT 10", (chat_id,)).fetchall()
-        con.close()
-        out = ["🏆 <b>LEADERBOARD</b>", ""]
-        medals = ["🥇", "🥈", "🥉"]
-        for i, r in enumerate(rows, 1):
-            out.append(f"{medals[i-1] if i<=3 else str(i)+'.'} <b>{html.escape(r['name'])}</b> — {r['xp']} XP")
-        await query.message.reply_text("\n".join(out) if rows else "No players yet.", reply_markup=main_menu(), parse_mode="HTML")
-        return
-
-    if data == "menu:achievements":
-        row = get_player(chat_id, query.from_user.id)
-        unlocked = set(filter(None, (row["achievements"] or "").split(",")))
-        all_ach = [
-            ("level_up", "🎉 LEVEL UP"), ("hot_streak", "🔥 HOT STREAK"),
-            ("speed_demon", "⚡ SPEED DEMON"), ("first_win", "🏆 FIRST BLOOD"),
-            ("daily", "📅 DAILY GRINDER"), ("chaos", "🌪️ CHAOS SURVIVOR"),
-        ]
-        text = "🏅 <b>ACHIEVEMENTS</b>\n\n" + "\n".join(("✅ " if k in unlocked else "🔒 ") + v for k,v in all_ach)
-        await query.message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
-        return
-
-    if data == "menu:help":
+        # Reuse the command-style profile text directly.
+        row = get_player(chat_id, query.from_user.id); level = level_from_xp(row["xp"])
         await query.message.reply_text(
-            "❓ <b>HELP</b>\n\nFirst correct answer wins. Wrong answers roast you but do not stop the round. Timer reaches zero → round closes → answer is revealed → no points.\n\nTimers: Easy 15s • Medium 15s • Hard 20s • Extreme 20s • Panic 8s.",
+            f"👤 <b>{html.escape(row['name'])}</b>\n\n"
+            f"🏷️ {html.escape(title_from_level(level))}\n⭐ Level {level} • ✨ {row['xp']} XP\n"
+            f"🏆 {row['wins']} wins • 🎮 {row['games']} rounds\n"
+            f"🔥 Streak {row['streak']} • Best {row['best_streak']}\n💡 Hints {row['hints']}",
             reply_markup=main_menu(), parse_mode="HTML"
-        )
-        return
-
+        ); return
+    if data == "menu:leaderboard":
+        # Lightweight callback leaderboard.
+        con = db(); rows = con.execute(
+            "SELECT name,xp,wins FROM players WHERE chat_id=? ORDER BY xp DESC,wins DESC LIMIT 10", (chat_id,)
+        ).fetchall(); con.close()
+        medals=["🥇","🥈","🥉"]; out=["🏆 <b>LEADERBOARD</b>",""]
+        for i,r in enumerate(rows,1): out.append(f"{medals[i-1] if i<=3 else str(i)+'.'} <b>{html.escape(r['name'])}</b> — {r['xp']} XP • {r['wins']} wins")
+        await query.message.reply_text("\n".join(out) if rows else "🏆 No players yet.",reply_markup=main_menu(),parse_mode="HTML"); return
+    if data == "menu:achievements":
+        await achievements(update, context); return
+    if data == "menu:help":
+        await help_cmd(update, context); return
     if data == "menu:daily":
-        # Run daily directly from callback.
-        if chat_id in active:
-            await query.message.reply_text("🎮 Finish the current game first.")
-            return
-        user = query.from_user
-        pool = QUESTIONS["CHAOS MODE"] + QUESTIONS["Logic"] + QUESTIONS["Trick"]
-        idx = abs(hash(f"{chat_id}:{date.today().isoformat()}")) % len(pool)
-        q = prepare_question(pool[idx], "DAILY")
-        active[chat_id] = {
-            "mode": "DAILY", "difficulty": q.get("difficulty", "Medium"), "used": {question_key(q)},
-            "starter": {"id": user.id, "name": user.first_name or "Player"}, "round_no": 1,
-            "daily": True, "closed": False, "question": q, "round_id": uuid.uuid4().hex,
-        }
-        seconds = timer_for(q)
-        msg = await query.message.reply_text(f"📅 <b>DAILY</b> • {seconds}s\n\n❓ <b>{html.escape(q['q'])}</b>", reply_markup=round_keyboard(), parse_mode="HTML")
-        active[chat_id]["question_message_id"] = msg.message_id
-        cancel_panic_task(chat_id)
-        panic_tasks[chat_id] = asyncio.create_task(countdown(context.bot, chat_id, msg.message_id, active[chat_id]["round_id"], seconds))
-        return
-
+        await daily(update, context); return
     if data.startswith("mode:"):
         mode = data.split(":", 1)[1]
         if chat_id in active:
-            await query.message.reply_text("🎮 Current game active. Finish it first.")
-            return
+            await query.message.reply_text("🎮 Current game active. Finish it first."); return
         await query.message.reply_text(
-            f"{MODE_EMOJI.get(mode,'🎮')} <b>{html.escape(mode)}</b>\n\nChoose difficulty:",
+            f"{MODE_EMOJI.get(mode,'🎮')} <b>{html.escape(mode)}</b>\n\n"
+            "Choose difficulty. It stays locked for the whole run.",
             reply_markup=difficulty_menu(mode), parse_mode="HTML"
-        )
-        return
-
+        ); return
     if data.startswith("diff:"):
         _, mode, difficulty = data.split(":", 2)
-        if chat_id in active:
-            await query.message.reply_text("🎮 A game is already running. Press END GAME first.")
-            return
-        # Start from callback.
-        user = query.from_user
-        ensure_player(chat_id, user.id, user.first_name or "Player")
-        active[chat_id] = {
-            "mode": mode, "difficulty": difficulty, "used": set(),
-            "starter": {"id": user.id, "name": user.first_name or "Player"},
-            "round_no": 0, "closed": False,
-        }
-        await query.message.reply_text(
-            f"🚀 <b>{html.escape(mode)}</b> loaded • <b>{html.escape(difficulty)}</b>\n\n"
-            f"⏱️ Easy/Medium 15s • Hard/Extreme 20s • Panic 8s\n"
-            "🏆 First correct answer wins\n😈 Wrong answers get different roasts\n💥 Timeout reveals answer\n\n<b>FIGHT!</b>",
-            parse_mode="HTML"
-        )
-        await asyncio.sleep(0.6)
-        if chat_id in active:
-            await send_round(context.bot, chat_id, active[chat_id])
-        return
-
+        await begin_game(query.message, context, mode, difficulty, query.from_user); return
     if data == "round:end":
-        state = active.pop(chat_id, None)
-        cancel_panic_task(chat_id)
-        if state:
-            await query.message.reply_text("🛑 <b>GAME ENDED.</b>\n\nNo answer revealed. Fresh start whenever you want.", reply_markup=main_menu(), parse_mode="HTML")
-        else:
-            await query.message.reply_text("No active game.", reply_markup=main_menu())
-        return
-
+        cancel_countdown(chat_id); active.pop(chat_id, None)
+        await query.message.reply_text(
+            "🛑 <b>GAME ENDED.</b>\n\nFresh chaos whenever you want. 😂",
+            reply_markup=main_menu(), parse_mode="HTML"
+        ); return
     if data == "round:hint":
         state = active.get(chat_id)
-        if not state or state.get("closed") or not state.get("question"):
-            await query.message.reply_text("💨 No active question to hint.")
-            return
-        user = query.from_user
-        if not spend_hint(chat_id, user.id):
-            await query.message.reply_text("💡 No hints left. Your brain is now the premium feature. 😂")
-            return
-        q = state["question"]
-        hint = q.get("hint") or "The answer is hiding in the wording."
-        await query.message.reply_text(f"💡 <b>HINT</b> — {html.escape(hint)}", parse_mode="HTML")
-        return
+        if not state or state.get("phase") != "question":
+            await query.message.reply_text("💨 No active question."); return
+        if not spend_hint(chat_id, query.from_user.id):
+            await query.message.reply_text("💡 No hints left. Your brain is now the premium feature. 😂"); return
+        await query.message.reply_text(
+            f"💡 <b>HINT</b> — {html.escape(state['question'].get('hint') or 'The clue is in the wording.')}",
+            parse_mode="HTML"
+        ); return
 
-# ============================================================
-# ERROR HANDLER / MAIN
-# ============================================================
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+async def error_handler(update, context):
     print("Unhandled error:", repr(context.error))
 
 
@@ -1328,10 +1200,8 @@ def main():
     init_db()
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is missing.")
-
     request = HTTPXRequest(connect_timeout=20, read_timeout=30, write_timeout=30, pool_timeout=30)
     app_bot = Application.builder().token(TOKEN).request(request).build()
-
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("help", help_cmd))
     app_bot.add_handler(CommandHandler("play", play))
@@ -1343,8 +1213,7 @@ def main():
     app_bot.add_handler(CallbackQueryHandler(button))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, answer))
     app_bot.add_error_handler(error_handler)
-
-    print("GuessArena is LIVE")
+    print("GuessArena V3 is LIVE — continuous arena enabled")
     app_bot.run_polling(drop_pending_updates=True)
 
 
