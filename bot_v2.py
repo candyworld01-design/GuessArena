@@ -1,48 +1,54 @@
 import os
-import random
-import sqlite3
-import html
-import hashlib
 import re
+import sqlite3
+import random
+import hashlib
 import difflib
-import threading
-from datetime import date
+from datetime import datetime, date
+from threading import Thread, Lock
 
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.request import HTTPXRequest
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes,
     MessageHandler,
+    ContextTypes,
     filters,
 )
 
 # =========================================================
 # GUESSARENA
-# Stable Render + Telegram version
+# Fun Telegram Quiz Game
+# Stable Render + Flask health server
 # =========================================================
 
 TOKEN = os.environ.get("BOT_TOKEN")
-DB = "guessarena.db"
+
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is missing.")
 
 # =========================================================
 # RENDER HEALTH SERVER
+# DO NOT ADD ANOTHER SERVER ON THE SAME PORT
 # =========================================================
 
-web_app = Flask(__name__)
+app = Flask(__name__)
 
 
-@web_app.route("/")
-def health_check():
-    return "GuessArena Bot is Alive! 🎮", 200
+@app.route("/")
+def health():
+    return "GuessArena is Alive! 🎮", 200
 
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
-    web_app.run(
+    app.run(
         host="0.0.0.0",
         port=port,
         debug=False,
@@ -50,19 +56,83 @@ def run_web_server():
     )
 
 
-# Start ONLY ONE web server.
-# The old dummy TCP server is intentionally not started because
-# it would try to bind the same PORT and can crash the deployment.
-server_thread = threading.Thread(
-    target=run_web_server,
-    daemon=True,
-)
-server_thread.start()
-
+Thread(target=run_web_server, daemon=True).start()
 
 # =========================================================
-# QUESTION BANK
+# DATABASE
 # =========================================================
+
+DB_FILE = "guessarena.db"
+db_lock = Lock()
+
+
+def db():
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    with db_lock:
+        conn = db()
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS players (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                name TEXT,
+                xp INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                games INTEGER DEFAULT 0,
+                streak INTEGER DEFAULT 0,
+                best_streak INTEGER DEFAULT 0,
+                hints INTEGER DEFAULT 3,
+                achievements TEXT DEFAULT '',
+                PRIMARY KEY(chat_id, user_id)
+            )
+        """)
+
+        conn.commit()
+        conn.close()
+
+
+init_db()
+
+# =========================================================
+# GAME STATE
+# =========================================================
+
+# One active game per Telegram chat.
+active_games = {}
+
+# Recently asked question IDs per chat.
+recent_questions = {}
+
+# =========================================================
+# QUESTION ENGINE
+# =========================================================
+
+def q(
+    qid,
+    mode,
+    difficulty,
+    question,
+    answers=None,
+    options=None,
+    hint="",
+    explanation="",
+):
+    return {
+        "id": qid,
+        "mode": mode,
+        "difficulty": difficulty,
+        "question": question,
+        "answers": answers or [],
+        "options": options or [],
+        "hint": hint,
+        "explanation": explanation,
+    }
+
 
 QUESTIONS = [
 
@@ -70,1154 +140,1651 @@ QUESTIONS = [
     # WORD
     # =====================================================
 
-    {
-        "mode": "Word",
-        "difficulty": "Easy",
-        "q": "_ A _ A _",
-        "hint": "🐼 Black & white animal",
-        "answers": ["panda"],
-        "xp": 10,
-    },
-    {
-        "mode": "Word",
-        "difficulty": "Easy",
-        "q": "_ P P L _",
-        "hint": "🍎 A fruit",
-        "answers": ["apple"],
-        "xp": 10,
-    },
-    {
-        "mode": "Word",
-        "difficulty": "Easy",
-        "q": "C _ T",
-        "hint": "🐱 Common pet",
-        "answers": ["cat"],
-        "xp": 10,
-    },
-    {
-        "mode": "Word",
-        "difficulty": "Easy",
-        "q": "D _ G",
-        "hint": "🐶 Loyal pet",
-        "answers": ["dog"],
-        "xp": 10,
-    },
-    {
-        "mode": "Word",
-        "difficulty": "Easy",
-        "q": "S _ N",
-        "hint": "☀️ Gives us light",
-        "answers": ["sun"],
-        "xp": 10,
-    },
-    {
-        "mode": "Word",
-        "difficulty": "Medium",
-        "q": "B _ A _ T",
-        "hint": "🚤 Moves on water",
-        "answers": ["boat"],
-        "xp": 20,
-    },
-    {
-        "mode": "Word",
-        "difficulty": "Medium",
-        "q": "P _ O N E",
-        "hint": "📱 You are probably holding one",
-        "answers": ["phone", "mobile", "mobile phone"],
-        "xp": 20,
-    },
-    {
-        "mode": "Word",
-        "difficulty": "Medium",
-        "q": "S C _ O O L",
-        "hint": "🎒 Students go here",
-        "answers": ["school"],
-        "xp": 20,
-    },
-    {
-        "mode": "Word",
-        "difficulty": "Hard",
-        "q": "Unscramble: R A E H T",
-        "hint": "❤️ Important organ",
-        "answers": ["heart"],
-        "xp": 30,
-    },
-    {
-        "mode": "Word",
-        "difficulty": "Hard",
-        "q": "Unscramble: T R A E W",
-        "hint": "💧 You drink it",
-        "answers": ["water"],
-        "xp": 30,
-    },
+    q(1, "word", "easy",
+      "Aisa word jo 'night' ke opposite hai?",
+      ["day"], ["Day", "Dark", "Moon", "Sleep"],
+      "Sun usually likes this time 😎",
+      "Night ka opposite Day hota hai."),
 
-    # =====================================================
-    # ANIMAL
-    # =====================================================
+    q(2, "word", "easy",
+      "Apple, Mango aur Banana kis category mein aate hain?",
+      ["fruit", "fruits"], ["Fruit", "Vehicle", "Animal", "Planet"],
+      "Kha sakte ho 🍎",
+      "Ye fruits hain."),
 
-    {
-        "mode": "Animal",
-        "difficulty": "Easy",
-        "q": "🐾 King of the jungle?",
-        "hint": "🦁 Big cat",
-        "answers": ["lion"],
-        "xp": 10,
-    },
-    {
-        "mode": "Animal",
-        "difficulty": "Easy",
-        "q": "🐘 Sabse bada land animal?",
-        "hint": "🦣 Huge ears",
-        "answers": ["elephant"],
-        "xp": 10,
-    },
-    {
-        "mode": "Animal",
-        "difficulty": "Easy",
-        "q": "🐄 Doodh dene wala common farm animal?",
-        "hint": "🥛 Moo",
-        "answers": ["cow", "cattle"],
-        "xp": 10,
-    },
-    {
-        "mode": "Animal",
-        "difficulty": "Medium",
-        "q": "🦒 Sabse lambi neck kis animal ki famous hai?",
-        "hint": "🌳 Leaves khaata hai",
-        "answers": ["giraffe"],
-        "xp": 20,
-    },
-    {
-        "mode": "Animal",
-        "difficulty": "Medium",
-        "q": "🐧 Ud nahi sakta, lekin bird hai?",
-        "hint": "❄️ Cold regions",
-        "answers": ["penguin"],
-        "xp": 20,
-    },
-    {
-        "mode": "Animal",
-        "difficulty": "Hard",
-        "q": "🐙 Teen hearts wala sea animal?",
-        "hint": "🌊 Eight arms",
-        "answers": ["octopus"],
-        "xp": 30,
-    },
-    {
-        "mode": "Animal",
-        "difficulty": "Hard",
-        "q": "🦇 Echolocation ke liye famous flying mammal?",
-        "hint": "🌙 Raat mein active",
-        "answers": ["bat"],
-        "xp": 30,
-    },
-    {
-        "mode": "Animal",
-        "difficulty": "Extreme",
-        "q": "🦈 Fish jaisa dikhta hai, lekin mammal hai. Kaun?",
-        "hint": "🌊 Famous intelligent ocean mammal",
-        "answers": ["dolphin", "whale"],
-        "xp": 50,
-    },
+    q(3, "word", "medium",
+      "'LOL' internet language mein generally kya mean karta hai?",
+      ["laugh out loud", "laughing out loud", "lol"],
+      ["Laugh Out Loud", "Lots Of Love", "Live Online", "Leave On Later"],
+      "Internet pe hasi wali situation 😂",
+      "LOL ka common meaning Laugh Out Loud hai."),
 
-    # =====================================================
-    # EMOJI
-    # =====================================================
+    q(4, "word", "medium",
+      "'BRB' ka common internet meaning kya hai?",
+      ["be right back", "brb"],
+      ["Be Right Back", "Bring Real Burger", "Be Really Busy", "Bye Right Bye"],
+      "Thodi der gayab hone wala message 👀",
+      "BRB = Be Right Back."),
 
-    {
-        "mode": "Emoji",
-        "difficulty": "Easy",
-        "q": "🌧️ + ☂️ = ?",
-        "hint": "🌂 Rain mein use hota hai",
-        "answers": ["umbrella"],
-        "xp": 10,
-    },
-    {
-        "mode": "Emoji",
-        "difficulty": "Easy",
-        "q": "🍎 + 👨‍⚕️ = ?",
-        "hint": "💡 Famous saying",
-        "answers": ["doctor", "doctor away", "an apple a day"],
-        "xp": 10,
-    },
-    {
-        "mode": "Emoji",
-        "difficulty": "Medium",
-        "q": "🦁 + 👑 = ?",
-        "hint": "🎬 Famous animated story",
-        "answers": ["lion king", "the lion king"],
-        "xp": 20,
-    },
-    {
-        "mode": "Emoji",
-        "difficulty": "Medium",
-        "q": "🔥 + 🐦 = ?",
-        "hint": "🐦 Mythical creature",
-        "answers": ["phoenix", "firebird", "fire bird"],
-        "xp": 20,
-    },
-    {
-        "mode": "Emoji",
-        "difficulty": "Hard",
-        "q": "🕷️ + 👨 = ?",
-        "hint": "🦸 Marvel character",
-        "answers": ["spiderman", "spider man", "spider-man"],
-        "xp": 30,
-    },
-    {
-        "mode": "Emoji",
-        "difficulty": "Hard",
-        "q": "🧊 + 👑 = ?",
-        "hint": "❄️ Disney character",
-        "answers": ["elsa", "frozen"],
-        "xp": 30,
-    },
+    q(5, "word", "hard",
+      "'Ambidextrous' person kis cheez mein specially capable hota hai?",
+      ["both hands", "using both hands", "both hand"],
+      ["Using both hands", "Running fast", "Speaking loudly", "Sleeping anywhere"],
+      "Left + right dono ka talent 🫡",
+      "Ambidextrous person dono hands ko effectively use kar sakta hai."),
+
+    q(6, "word", "medium",
+      "Kisi cheez ko secretly observe karna — common English word?",
+      ["spy", "spying"],
+      ["Spy", "Jump", "Cook", "Race"],
+      "Agent mode ON 🕵️",
+      "Spy/spying ka use secretly observe karne ke liye hota hai."),
+
+    q(7, "word", "easy",
+      "Jo insaan bahut zyada sota hai, usse casually kya bol sakte ho?",
+      ["sleepyhead", "sleepy head"],
+      ["Sleepyhead", "Speedster", "Brainiac", "Showoff"],
+      "Alarm ka sabse bada enemy 😂",
+      "Sleepyhead casual expression hai."),
+
+    q(8, "word", "medium",
+      "'Ghosting' ka meaning kya hai?",
+      ["ignoring someone", "suddenly stopping communication",
+       "stop replying", "stopping communication"],
+      ["Suddenly stopping communication", "Dancing at night",
+       "Being invisible", "Calling repeatedly"],
+      "Reply: 'seen 2 days ago' 💀",
+      "Ghosting means suddenly stopping communication."),
+
+    q(9, "word", "hard",
+      "'Nostalgia' kis feeling ko describe karta hai?",
+      ["fond memories", "longing for the past",
+       "memories of the past", "past memories"],
+      ["Feeling about the past", "Fear of future",
+       "Anger", "Confusion"],
+      "Purani photos dekh ke jo feeling aati hai 🥹",
+      "Nostalgia is a sentimental feeling connected to the past."),
+
+    q(10, "word", "easy",
+      "Keyboard par sabse lamba common key kaunsa hai?",
+      ["spacebar", "space bar"],
+      ["Spacebar", "Enter", "Shift", "Escape"],
+      "Khali jagah banata hai 😎",
+      "Spacebar usually keyboard ki longest key hoti hai."),
 
     # =====================================================
     # RIDDLE
     # =====================================================
 
-    {
-        "mode": "Riddle",
-        "difficulty": "Easy",
-        "q": "I have hands but cannot clap. What am I?",
-        "hint": "⏰ Time",
-        "answers": ["clock", "a clock"],
-        "xp": 10,
-    },
-    {
-        "mode": "Riddle",
-        "difficulty": "Easy",
-        "q": "What has a face and two hands but no arms or legs?",
-        "hint": "⏰ Time",
-        "answers": ["clock", "watch", "a clock", "a watch"],
-        "xp": 10,
-    },
-    {
-        "mode": "Riddle",
-        "difficulty": "Medium",
-        "q": "Cities hain, houses nahi. Rivers hain, water nahi. Main kya hoon?",
-        "hint": "🗺️ Fold karke rakha ja sakta hai",
-        "answers": ["map", "a map"],
-        "xp": 20,
-    },
-    {
-        "mode": "Riddle",
-        "difficulty": "Medium",
-        "q": "Keys hain, lekin locks nahi khol sakta. Kya hai?",
-        "hint": "🎹 Music",
-        "answers": ["piano", "a piano", "keyboard", "computer keyboard"],
-        "xp": 20,
-    },
-    {
-        "mode": "Riddle",
-        "difficulty": "Medium",
-        "q": "Jitna zyada dry karta hoon, utna hi wet hota hoon. Main kya hoon?",
-        "hint": "🛁 Bathroom",
-        "answers": ["towel", "a towel"],
-        "xp": 20,
-    },
-    {
-        "mode": "Riddle",
-        "difficulty": "Hard",
-        "q": "Main bolta nahi, phir bhi tumhari awaaz wapas deta hoon.",
-        "hint": "⛰️ Mountains ke paas sunai de sakta hai",
-        "answers": ["echo", "an echo"],
-        "xp": 30,
-    },
-    {
-        "mode": "Riddle",
-        "difficulty": "Hard",
-        "q": "What gets wetter as it dries?",
-        "hint": "🛁 You probably use it after a shower",
-        "answers": ["towel"],
-        "xp": 30,
-    },
-    {
-        "mode": "Riddle",
-        "difficulty": "Extreme",
-        "q": "What can travel around the world while staying in one corner?",
-        "hint": "✉️ Think about a letter",
-        "answers": ["stamp", "a stamp"],
-        "xp": 50,
-    },
+    q(11, "riddle", "easy",
+      "Mere paas keys hain, par locks nahi. Main kya hoon?",
+      ["keyboard"],
+      [],
+      "Computer ke saamne milunga 💻",
+      "Keyboard mein keys hoti hain, locks nahi."),
+
+    q(12, "riddle", "easy",
+      "Jitna zyada mujhe dry karoge, utna hi main wet hota jaunga. Main kya hoon?",
+      ["towel"],
+      [],
+      "Bathroom ka hero 🧼",
+      "Towel kisi cheez ko dry karte hue khud wet hota hai."),
+
+    q(13, "riddle", "medium",
+      "Mere paas face aur two hands hain, par arms aur legs nahi. Main kya hoon?",
+      ["clock", "watch"],
+      [],
+      "Time bata raha hoon ⏰",
+      "Clock/watch ke face aur hands hote hain."),
+
+    q(14, "riddle", "easy",
+      "Main toot sakta hoon bina touch kiye. Main kya hoon?",
+      ["promise"],
+      [],
+      "Bolne se banta hoon 🤝",
+      "Promise ko bina physically touch kiye break kiya ja sakta hai."),
+
+    q(15, "riddle", "medium",
+      "Mere paas neck hai par head nahi. Main kya hoon?",
+      ["bottle"],
+      [],
+      "Kitchen mein mil sakta hoon 🍾",
+      "Bottle ka neck hota hai."),
+
+    q(16, "riddle", "hard",
+      "Jitna mujhe remove karoge, main utna hi bada hota jaunga. Main kya hoon?",
+      ["hole", "a hole"],
+      [],
+      "Zameen mein bhi ho sakta hai 👀",
+      "Hole ko bada karne ke liye usse aur material remove karna padta hai."),
+
+    q(17, "riddle", "easy",
+      "Main run karta hoon, par walk nahi. Mere paas bed hai, par main sota nahi. Main kya hoon?",
+      ["river"],
+      [],
+      "Nature mein flow karta hoon 🌊",
+      "River runs and has a riverbed."),
+
+    q(18, "riddle", "medium",
+      "Mera shadow hota hai, par main light nahi hoon. Main kya hoon?",
+      ["object"],
+      [],
+      "Light padte hi yaad aata hoon 😎",
+      "Objects can cast shadows."),
 
     # =====================================================
-    # LOGIC
+    # EMOJI
     # =====================================================
 
-    {
-        "mode": "Logic",
-        "difficulty": "Easy",
-        "q": "2 + 2 × 2 = ?",
-        "hint": "🧠 BODMAS yaad hai?",
-        "answers": ["6"],
-        "xp": 10,
-    },
-    {
-        "mode": "Logic",
-        "difficulty": "Medium",
-        "q": "2 fathers aur 2 sons fishing par gaye. Total 3 log the. Kaise?",
-        "hint": "👴👨👦 Ek person dono roles ho sakta hai",
-        "answers": [
-            "grandfather father son",
-            "grandfather father and son",
-            "grandfather father son trio",
-        ],
-        "xp": 20,
-    },
-    {
-        "mode": "Logic",
-        "difficulty": "Medium",
-        "q": "A room has 4 corners. Har corner mein ek cat hai. Total cats kitni?",
-        "hint": "🐱 Har corner mein ek",
-        "answers": ["4", "four"],
-        "xp": 20,
-    },
-    {
-        "mode": "Logic",
-        "difficulty": "Hard",
-        "q": "Ek aadmi ke paas 17 sheep thi. All but 9 ran away. Kitni bachi?",
-        "hint": "🔎 'All but 9' carefully padho",
-        "answers": ["9", "nine"],
-        "xp": 30,
-    },
-    {
-        "mode": "Logic",
-        "difficulty": "Hard",
-        "q": "Aapke paas 3 switches hain aur doosre room mein 3 bulbs. Ek hi baar bulb room mein ja sakte ho. Kaise identify karoge?",
-        "hint": "💡 Light ke saath heat bhi clue hai",
-        "answers": [
-            "one on wait off second on",
-            "heat",
-            "use heat",
-            "switch on wait switch off",
-        ],
-        "xp": 30,
-    },
-    {
-        "mode": "Logic",
-        "difficulty": "Extreme",
-        "q": "Ek farmer ke paas 3 apples hain. Tum 2 le lete ho. Tumhare paas kitne apples?",
-        "hint": "🍎 Jo tumne liye...",
-        "answers": ["2", "two"],
-        "xp": 50,
-    },
+    q(19, "emoji", "easy",
+      "Guess the phrase: 🍎 + 👁️",
+      ["apple of my eye", "apple of my eye"],
+      [],
+      "Body part + fruit 👀",
+      "🍎 + 👁️ = Apple of my eye."),
 
-    # =====================================================
-    # PATTERN
-    # =====================================================
+    q(20, "emoji", "easy",
+      "Guess the movie-style phrase: 🦁 + 👑",
+      ["lion king", "the lion king"],
+      [],
+      "Jungle ka royal banda 👑",
+      "Lion + crown = The Lion King."),
 
-    {
-        "mode": "Pattern",
-        "difficulty": "Easy",
-        "q": "2, 4, 6, 8, ?",
-        "hint": "➕ Same jump",
-        "answers": ["10", "ten"],
-        "xp": 10,
-    },
-    {
-        "mode": "Pattern",
-        "difficulty": "Easy",
-        "q": "5, 10, 15, 20, ?",
-        "hint": "🔢 +5",
-        "answers": ["25"],
-        "xp": 10,
-    },
-    {
-        "mode": "Pattern",
-        "difficulty": "Medium",
-        "q": "3, 6, 12, 24, ?",
-        "hint": "✖️ Same multiplier",
-        "answers": ["48"],
-        "xp": 20,
-    },
-    {
-        "mode": "Pattern",
-        "difficulty": "Medium",
-        "q": "1, 4, 9, 16, ?",
-        "hint": "🔢 Square numbers",
-        "answers": ["25"],
-        "xp": 20,
-    },
-    {
-        "mode": "Pattern",
-        "difficulty": "Hard",
-        "q": "2, 6, 12, 20, 30, ?",
-        "hint": "🔢 Differences dekho",
-        "answers": ["42"],
-        "xp": 30,
-    },
-    {
-        "mode": "Pattern",
-        "difficulty": "Hard",
-        "q": "1, 1, 2, 3, 5, 8, ?",
-        "hint": "🧠 Previous two numbers",
-        "answers": ["13"],
-        "xp": 30,
-    },
-    {
-        "mode": "Pattern",
-        "difficulty": "Extreme",
-        "q": "2, 3, 5, 9, 17, ?",
-        "hint": "🔢 Differences/multiplier mix",
-        "answers": ["33"],
-        "xp": 50,
-    },
+    q(21, "emoji", "medium",
+      "Guess the phrase: 🔥 + ❤️",
+      ["hot heart", "burning heart"],
+      [],
+      "Dil ka temperature high 🔥",
+      "Burning heart/hot heart is the intended phrase."),
+
+    q(22, "emoji", "easy",
+      "Guess the activity: 🍿 + 🎬",
+      ["movie", "watching movie", "movie night"],
+      [],
+      "Weekend plan spotted 😎",
+      "Popcorn + movie = movie/movie night."),
+
+    q(23, "emoji", "medium",
+      "Guess the phrase: 🧠 + 💥",
+      ["mind blown", "mindblown"],
+      [],
+      "Dimaag ne resignation de diya 🤯",
+      "Brain + explosion = mind blown."),
+
+    q(24, "emoji", "easy",
+      "Guess the place: 🏖️ + ☀️",
+      ["beach", "sea beach"],
+      [],
+      "Chappal + sand combo 🩴",
+      "Beach is the intended answer."),
 
     # =====================================================
     # TRICK
     # =====================================================
 
-    {
-        "mode": "Trick",
-        "difficulty": "Easy",
-        "q": "What has many teeth but cannot bite?",
-        "hint": "💇 Hair ke saath use hota hai",
-        "answers": ["comb", "a comb"],
-        "xp": 10,
-    },
-    {
-        "mode": "Trick",
-        "difficulty": "Medium",
-        "q": "Ek room mein 10 candles hain. 3 bujh gayi. Kitni candles room mein hain?",
-        "hint": "🕯️ Question carefully padho",
-        "answers": ["10", "ten"],
-        "xp": 20,
-    },
-    {
-        "mode": "Trick",
-        "difficulty": "Medium",
-        "q": "What month has 28 days?",
-        "hint": "📅 Sirf February mat sochna",
-        "answers": [
-            "all",
-            "all months",
-            "every month",
-            "every month has 28 days",
-        ],
-        "xp": 20,
-    },
-    {
-        "mode": "Trick",
-        "difficulty": "Hard",
-        "q": "Aisa kya hai jo jitna nikalte jao, utna bada hota jata hai?",
-        "hint": "🕳️ Zameen se related",
-        "answers": ["hole", "a hole", "gaddha", "pit"],
-        "xp": 30,
-    },
-    {
-        "mode": "Trick",
-        "difficulty": "Hard",
-        "q": "Before Mount Everest was discovered, what was the highest mountain?",
-        "hint": "⛰️ Everest tab bhi exist karta tha",
-        "answers": [
-            "mount everest",
-            "everest",
-        ],
-        "xp": 30,
-    },
-    {
-        "mode": "Trick",
-        "difficulty": "Extreme",
-        "q": "If you overtake the person in second place, what place are you in?",
-        "hint": "🏃 Position carefully",
-        "answers": ["second", "second place", "2nd"],
-        "xp": 50,
-    },
+    q(25, "trick", "easy",
+      "Ek kilo cotton aur ek kilo iron mein kaunsa heavier hai?",
+      ["same", "equal", "both same", "equal weight"],
+      ["Cotton", "Iron", "Both same", "Depends"],
+      "Question mein 'kilo' pe dhyan do 👀",
+      "Dono ka weight 1 kg hai."),
+
+    q(26, "trick", "medium",
+      "Aap race mein second person ko overtake karte ho. Ab aap kis position par ho?",
+      ["second", "2nd", "second place"],
+      ["First", "Second", "Third", "Last"],
+      "Overtake kis ko kiya? 😏",
+      "Aap second person ko overtake karte ho, so you become second."),
+
+    q(27, "trick", "easy",
+      "Ek rooster roof par egg deta hai. Egg kis side girega?",
+      ["roosters don't lay eggs", "rooster cannot lay eggs"],
+      [],
+      "Rooster bhai se pehle biology pucho 😂",
+      "Roosters don't lay eggs."),
+
+    q(28, "trick", "medium",
+      "12 months mein kitne months mein 28 days hote hain?",
+      ["12", "all", "all 12"],
+      [],
+      "February ne tumhe confuse karne ki koshish ki 😭",
+      "Har month mein at least 28 days hote hain."),
+
+    q(29, "trick", "easy",
+      "Agar electric train north ja rahi hai aur wind south, smoke kis direction jayega?",
+      ["no smoke", "there is no smoke"],
+      [],
+      "Train ka type check kar bhai 😂",
+      "Electric train smoke produce nahi karti."),
+
+    q(30, "trick", "medium",
+      "5 machines 5 minutes mein 5 items banati hain. 100 machines 100 items kitne minutes mein banayengi?",
+      ["5", "5 minutes"],
+      [],
+      "Machine multiplication trap 🤯",
+      "Each machine makes one item in 5 minutes."),
+
+    # =====================================================
+    # ANIMAL
+    # =====================================================
+
+    q(31, "animal", "easy",
+      "Duniya ka sabse bada land animal?",
+      ["elephant", "african elephant"],
+      ["Elephant", "Giraffe", "Rhino", "Hippo"],
+      "Big ears incoming 🐘",
+      "African elephant is the largest land animal."),
+
+    q(32, "animal", "medium",
+      "Kaunsa animal apni body ka color environment ke according change karne ke liye famous hai?",
+      ["chameleon"],
+      ["Chameleon", "Tiger", "Horse", "Penguin"],
+      "Nature ka color filter 🎨",
+      "Chameleon is famous for changing coloration."),
+
+    q(33, "animal", "easy",
+      "Fastest land animal?",
+      ["cheetah"],
+      ["Cheetah", "Lion", "Horse", "Leopard"],
+      "Speed 100+ mode 🏎️",
+      "Cheetah is the fastest land animal."),
+
+    q(34, "animal", "medium",
+      "Kaunsa bird backwards fly kar sakta hai?",
+      ["hummingbird"],
+      ["Hummingbird", "Eagle", "Crow", "Swan"],
+      "Reverse gear unlocked 🐦",
+      "Hummingbirds can fly backwards."),
+
+    q(35, "animal", "medium",
+      "Octopus ke kitne arms hote hain?",
+      ["8", "eight"],
+      ["6", "8", "10", "12"],
+      "Spider underwater edition? 😭",
+      "Octopus has eight arms."),
+
+    q(36, "animal", "easy",
+      "Baby kangaroo ko kya kehte hain?",
+      ["joey"],
+      ["Joey", "Cub", "Calf", "Kit"],
+      "Kangaroo ka tiny version 🦘",
+      "A baby kangaroo is called a joey."),
 
     # =====================================================
     # CITY
     # =====================================================
 
-    {
-        "mode": "City",
-        "difficulty": "Easy",
-        "q": "🕌 Taj Mahal kis city mein hai?",
-        "hint": "🇮🇳 Uttar Pradesh",
-        "answers": ["agra"],
-        "xp": 10,
-    },
-    {
-        "mode": "City",
-        "difficulty": "Easy",
-        "q": "🌆 Gateway of India kis city mein hai?",
-        "hint": "🇮🇳 West coast",
-        "answers": ["mumbai", "bombay"],
-        "xp": 10,
-    },
-    {
-        "mode": "City",
-        "difficulty": "Medium",
-        "q": "🗼 Eiffel Tower kis city mein hai?",
-        "hint": "🇫🇷 France",
-        "answers": ["paris"],
-        "xp": 20,
-    },
-    {
-        "mode": "City",
-        "difficulty": "Medium",
-        "q": "🗽 Statue of Liberty kis city mein hai?",
-        "hint": "🇺🇸 New York",
-        "answers": ["new york", "new york city", "nyc"],
-        "xp": 20,
-    },
-    {
-        "mode": "City",
-        "difficulty": "Medium",
-        "q": "🏰 India Gate kis city mein hai?",
-        "hint": "🇮🇳 Capital city",
-        "answers": ["delhi", "new delhi"],
-        "xp": 20,
-    },
-    {
-        "mode": "City",
-        "difficulty": "Hard",
-        "q": "🏛️ Charminar kis Indian city mein hai?",
-        "hint": "💎 Telangana",
-        "answers": ["hyderabad"],
-        "xp": 30,
-    },
-    {
-        "mode": "City",
-        "difficulty": "Hard",
-        "q": "🌊 Marine Drive kis city mein famous hai?",
-        "hint": "🌆 Maharashtra",
-        "answers": ["mumbai", "bombay"],
-        "xp": 30,
-    },
-    {
-        "mode": "City",
-        "difficulty": "Extreme",
-        "q": "🏯 Red Fort kis city mein hai?",
-        "hint": "🇮🇳 Historic capital",
-        "answers": ["delhi", "new delhi"],
-        "xp": 50,
-    },
+    q(37, "city", "easy",
+      "Eiffel Tower kis city mein hai?",
+      ["paris"],
+      ["Paris", "Rome", "London", "Madrid"],
+      "France ka iconic spot 🗼",
+      "Eiffel Tower is in Paris."),
+
+    q(38, "city", "easy",
+      "Statue of Liberty kis city mein hai?",
+      ["new york", "new york city", "nyc"],
+      ["New York", "Chicago", "Boston", "Los Angeles"],
+      "Big city + big statue 🗽",
+      "Statue of Liberty is in New York Harbor."),
+
+    q(39, "city", "medium",
+      "Colosseum kis city mein hai?",
+      ["rome"],
+      ["Rome", "Athens", "Paris", "Berlin"],
+      "Ancient history vibes 🏛️",
+      "Colosseum is in Rome."),
+
+    q(40, "city", "medium",
+      "Burj Khalifa kis city mein hai?",
+      ["dubai"],
+      ["Dubai", "Abu Dhabi", "Doha", "Riyadh"],
+      "Height dekh ke neck pain 😭",
+      "Burj Khalifa is in Dubai."),
+
+    q(41, "city", "easy",
+      "Big Ben kis city se associated hai?",
+      ["london"],
+      ["London", "Manchester", "Paris", "Dublin"],
+      "Clock tower vibes ⏰",
+      "Big Ben is associated with London."),
+
+    q(42, "city", "medium",
+      "Sydney Opera House kis city mein hai?",
+      ["sydney"],
+      ["Sydney", "Melbourne", "Perth", "Brisbane"],
+      "Australia ka iconic shell 🎭",
+      "Sydney Opera House is in Sydney."),
 
     # =====================================================
-    # BONUS MIXED QUESTIONS
+    # PATTERN
     # =====================================================
 
-    {
-        "mode": "Riddle",
-        "difficulty": "Extreme",
-        "q": "I am always in front of you but can never be seen. What am I?",
-        "hint": "🔮 Time se related",
-        "answers": ["future", "the future"],
-        "xp": 50,
-    },
-    {
-        "mode": "Logic",
-        "difficulty": "Extreme",
-        "q": "You have one match and enter a dark room with a candle, lamp and fireplace. What do you light first?",
-        "hint": "🔥 First step obvious hai",
-        "answers": ["match", "the match", "matchstick"],
-        "xp": 50,
-    },
-    {
-        "mode": "Trick",
-        "difficulty": "Extreme",
-        "q": "What comes once in a minute, twice in a moment, but never in a thousand years?",
-        "hint": "🔤 Letters",
-        "answers": ["m", "letter m"],
-        "xp": 50,
-    },
+    q(43, "pattern", "easy",
+      "Next number: 2, 4, 6, 8, ?",
+      ["10", "ten"],
+      [],
+      "Har baar +2 👀",
+      "Numbers increase by 2."),
+
+    q(44, "pattern", "easy",
+      "Next number: 5, 10, 15, 20, ?",
+      ["25", "twenty five"],
+      [],
+      "5 ka gang hai 😎",
+      "Add 5 each time."),
+
+    q(45, "pattern", "medium",
+      "Next number: 1, 4, 9, 16, ?",
+      ["25", "twenty five"],
+      [],
+      "Squares ko pehchano 🧠",
+      "These are square numbers: 1², 2², 3², 4², 5²."),
+
+    q(46, "pattern", "medium",
+      "Next number: 3, 6, 12, 24, ?",
+      ["48"],
+      [],
+      "Har baar double 😎",
+      "Each number is doubled."),
+
+    q(47, "pattern", "hard",
+      "Next number: 1, 1, 2, 3, 5, 8, ?",
+      ["13", "thirteen"],
+      [],
+      "Fibonacci entered the chat 🧠",
+      "Each term is the sum of the previous two."),
+
+    q(48, "pattern", "hard",
+      "Next number: 2, 6, 12, 20, 30, ?",
+      ["42"],
+      [],
+      "Difference check kar 👀",
+      "Differences are 4, 6, 8, 10, 12."),
+
+    # =====================================================
+    # LOGIC
+    # =====================================================
+
+    q(49, "logic", "easy",
+      "Agar all cats are animals aur Tom ek cat hai, Tom kya hai?",
+      ["animal", "an animal"],
+      [],
+      "Basic logic, boss 😎",
+      "If all cats are animals and Tom is a cat, Tom is an animal."),
+
+    q(50, "logic", "medium",
+      "Ek room mein 3 bulbs hain aur bahar 3 switches. Sirf ek baar room mein ja sakte ho. Kaise identify karoge?",
+      ["heat", "bulb heat", "use heat"],
+      [],
+      "Light ke saath temperature bhi clue hai 💡",
+      "Switch one on, wait, turn it off; switch two on; enter and use lit/warm/cold states."),
+
+    q(51, "logic", "easy",
+      "Agar Monday ke 3 din baad kaunsa day hoga?",
+      ["thursday"],
+      ["Tuesday", "Wednesday", "Thursday", "Friday"],
+      "Monday + 3 📅",
+      "Monday + 3 days = Thursday."),
+
+    q(52, "logic", "medium",
+      "Ek farmer ke paas 10 sheep hain. All but 3 run away. Kitni sheep bachi?",
+      ["3", "three"],
+      [],
+      "'All but 3' ka matlab samjho 😏",
+      "Three sheep remain."),
+
+    q(53, "logic", "medium",
+      "Aapke paas 2 apples hain aur aap 1 le lete ho. Aapke paas kitne apples hain?",
+      ["1", "one"],
+      [],
+      "Apne paas kitne aaye? 👀",
+      "You took one, so you have one."),
+
+    # =====================================================
+    # RANDOM / MIXED
+    # =====================================================
+
+    q(54, "random", "easy",
+      "Earth ka natural satellite kya hai?",
+      ["moon", "the moon"],
+      ["Moon", "Mars", "Sun", "Venus"],
+      "Raat ka regular visitor 🌙",
+      "The Moon is Earth's natural satellite."),
+
+    q(55, "random", "easy",
+      "Water ka chemical formula kya hai?",
+      ["h2o", "h₂o"],
+      ["H2O", "CO2", "O2", "NaCl"],
+      "School ka OG formula 💧",
+      "Water is H2O."),
+
+    q(56, "random", "easy",
+      "Rainbow mein traditionally kitne colors count kiye jaate hain?",
+      ["7", "seven"],
+      ["5", "6", "7", "8"],
+      "ROYGBIV 🌈",
+      "Traditionally seven colors are identified."),
+
+    q(57, "random", "medium",
+      "Human body ka largest organ kya hai?",
+      ["skin"],
+      ["Skin", "Heart", "Liver", "Lung"],
+      "Body ka outer cover 😎",
+      "Skin is the largest organ."),
+
+    q(58, "random", "medium",
+      "Solar system ka largest planet?",
+      ["jupiter"],
+      ["Jupiter", "Saturn", "Earth", "Neptune"],
+      "Planet ka heavyweight 🪐",
+      "Jupiter is the largest planet."),
+
+    # =====================================================
+    # MEME
+    # =====================================================
+
+    q(59, "meme", "easy",
+      "Internet par 'POV' ka common meaning kya hota hai?",
+      ["point of view", "pov"],
+      ["Point of View", "Power Of Video", "Proof Of Victory", "Post Online Video"],
+      "POV: tum ye question solve kar rahe ho 👀",
+      "POV = Point of View."),
+
+    q(60, "meme", "easy",
+      "'Sus' internet slang mein kis word ka short form hai?",
+      ["suspicious", "sus"],
+      ["Suspicious", "Successful", "Serious", "Super"],
+      "Among Us ne famous banaya 👀",
+      "Sus is short for suspicious."),
+
+    q(61, "meme", "medium",
+      "'NPC' internet slang mein originally kis term se aaya?",
+      ["non player character", "non-player character", "nonplayer character"],
+      ["Non-Player Character", "New Personal Computer",
+       "Next Player Challenge", "No Problem Chat"],
+      "Gaming se internet tak 🎮",
+      "NPC = Non-Player Character."),
+
+    q(62, "meme", "easy",
+      "'GOAT' ka internet meaning kya hai?",
+      ["greatest of all time", "greatest of all-time", "goat"],
+      ["Greatest Of All Time", "Game Of All Teams",
+       "Good Online Activity", "Goal Of All Teams"],
+      "Bakri nahi 😂",
+      "GOAT = Greatest Of All Time."),
+
+    q(63, "meme", "medium",
+      "'Rizz' generally kis cheez ke liye slang hai?",
+      ["charisma", "romantic charm", "charm"],
+      ["Charisma/charm", "Speed", "Intelligence", "Money"],
+      "Smooth talking energy 😎",
+      "Rizz is slang associated with charisma/charm."),
+
+    # =====================================================
+    # FOOD
+    # =====================================================
+
+    q(64, "food", "easy",
+      "Sushi traditionally kis country se associated hai?",
+      ["japan"],
+      ["Japan", "China", "Thailand", "Korea"],
+      "Rice + sea vibes 🍣",
+      "Sushi is strongly associated with Japan."),
+
+    q(65, "food", "easy",
+      "Pizza ka origin commonly kis country se associated hai?",
+      ["italy"],
+      ["Italy", "France", "Spain", "Greece"],
+      "Cheese alert 🍕",
+      "Modern pizza is strongly associated with Italy."),
+
+    q(66, "food", "medium",
+      "Guacamole ka main ingredient kya hota hai?",
+      ["avocado"],
+      ["Avocado", "Apple", "Potato", "Coconut"],
+      "Green dip 🥑",
+      "Avocado is the main ingredient."),
+
+    q(67, "food", "easy",
+      "French fries mein 'French' hone ke baad bhi commonly kis vegetable se banti hain?",
+      ["potato", "potatoes"],
+      ["Potato", "Carrot", "Corn", "Beans"],
+      "Universal snack 🥔",
+      "French fries are made from potatoes."),
+
+    q(68, "food", "medium",
+      "Hummus ka main ingredient kya hai?",
+      ["chickpea", "chickpeas", "garbanzo beans"],
+      ["Chickpeas", "Lentils", "Peanuts", "Rice"],
+      "Dip time 😋",
+      "Hummus is primarily made from chickpeas."),
+
+    # =====================================================
+    # GAMING
+    # =====================================================
+
+    q(69, "gaming", "easy",
+      "Minecraft mein basic building material ke liye famous block?",
+      ["dirt", "wood", "stone"],
+      ["Dirt", "Diamond", "Bedrock", "Obsidian"],
+      "Starter house 2 minutes mein 🧱",
+      "Dirt is one of the basic/common Minecraft blocks."),
+
+    q(70, "gaming", "easy",
+      "Mario ka brother kaun hai?",
+      ["luigi"],
+      ["Luigi", "Link", "Sonic", "Kirby"],
+      "Green cap incoming 🟢",
+      "Luigi is Mario's brother."),
+
+    q(71, "gaming", "medium",
+      "Pokémon franchise mein Pikachu kis type ka Pokémon hai?",
+      ["electric", "electric type"],
+      ["Electric", "Fire", "Water", "Grass"],
+      "Thunder ⚡",
+      "Pikachu is an Electric-type Pokémon."),
+
+    q(72, "gaming", "easy",
+      "Among Us mein impostor ka main goal kya hota hai?",
+      ["eliminate crewmates", "kill crewmates", "eliminate crew"],
+      [],
+      "Sus detected 👀",
+      "The Impostor tries to eliminate the crew while avoiding detection."),
+
+    q(73, "gaming", "medium",
+      "Tetris mein pieces generally kis shape ke blocks se bane hote hain?",
+      ["squares", "four squares"],
+      [],
+      "4 blocks ka OG puzzle 🧩",
+      "Tetrominoes are made from four square blocks."),
+
+    # =====================================================
+    # MOVIE / SERIES
+    # =====================================================
+
+    q(74, "movie", "easy",
+      "Harry Potter mein school ka naam kya hai?",
+      ["hogwarts", "hogwarts school"],
+      ["Hogwarts", "Narnia", "Nevermore", "Rivendell"],
+      "Magic school 🪄",
+      "Hogwarts is the wizarding school."),
+
+    q(75, "movie", "easy",
+      "The Lion King mein Simba kis animal ka hai?",
+      ["lion"],
+      ["Lion", "Tiger", "Wolf", "Bear"],
+      "Hakuna Matata 🦁",
+      "Simba is a lion."),
+
+    q(76, "movie", "medium",
+      "Spider-Man ka real first name kya hai? Common Peter Parker version.",
+      ["peter parker"],
+      ["Peter Parker", "Bruce Wayne", "Clark Kent", "Tony Stark"],
+      "Web-slinger 🕷️",
+      "Peter Parker is Spider-Man's civilian identity."),
+
+    q(77, "movie", "easy",
+      "Frozen mein snowman ka naam kya hai?",
+      ["olaf"],
+      ["Olaf", "Sven", "Kristoff", "Hans"],
+      "Summer lover 😂☃️",
+      "The snowman is Olaf."),
+
+    q(78, "movie", "medium",
+      "Wednesday series mein main character ka surname?",
+      ["addams"],
+      ["Addams", "Bates", "Wayne", "Parker"],
+      "Nevermore vibes 🖤",
+      "Wednesday Addams."),
+
+    # =====================================================
+    # WEIRD FACTS
+    # =====================================================
+
+    q(79, "weird", "medium",
+      "Banana botanical classification ke hisaab se berry hai. True ya False?",
+      ["true"],
+      ["True", "False"],
+      "Fruit classification ka plot twist 🍌",
+      "Botanically, bananas are berries."),
+
+    q(80, "weird", "medium",
+      "Octopus ke 3 hearts hote hain. True ya False?",
+      ["true"],
+      ["True", "False"],
+      "Dil ka shortage nahi ❤️",
+      "Octopuses have three hearts."),
+
+    q(81, "weird", "medium",
+      "Sharks dinosaurs se older lineage rakhte hain. True ya False?",
+      ["true"],
+      ["True", "False"],
+      "Shark bhai ancient hai 🦈",
+      "Shark lineage predates dinosaurs."),
+
+    q(82, "weird", "easy",
+      "Honey properly stored conditions mein bahut long time tak stable reh sakta hai. True ya False?",
+      ["true"],
+      ["True", "False"],
+      "Honey ka shelf-life serious hai 🍯",
+      "Honey is known for exceptional long-term stability when properly stored."),
+
+    q(83, "weird", "medium",
+      "Wombat ka poop cube-shaped hota hai. True ya False?",
+      ["true"],
+      ["True", "False"],
+      "Nature ne geometry kar di 😂",
+      "Wombats produce cube-shaped feces."),
+
+    # =====================================================
+    # BRAIN BATTLE
+    # =====================================================
+
+    q(84, "brain", "easy",
+      "Agar 10 + 10 × 0 = ?",
+      ["10", "ten"],
+      [],
+      "BODMAS yaad hai? 😏",
+      "Multiplication first: 10 + 0 = 10."),
+
+    q(85, "brain", "medium",
+      "Agar ek dozen mein 12 items hote hain, half-dozen mein?",
+      ["6", "six"],
+      [],
+      "Dozen ka half ✂️",
+      "Half of 12 is 6."),
+
+    q(86, "brain", "medium",
+      "Clock mein 3:00 par minute hand aur hour hand ke beech angle?",
+      ["90", "90 degrees"],
+      [],
+      "Right angle vibes 📐",
+      "At 3:00, the hands are 90° apart."),
+
+    q(87, "brain", "hard",
+      "A number ko 2 se multiply karke 6 add kiya, result 20. Number?",
+      ["7", "seven"],
+      [],
+      "Reverse calculation 🧠",
+      "2x + 6 = 20, so x = 7."),
+
+    q(88, "brain", "medium",
+      "Ek square ke kitne sides hote hain?",
+      ["4", "four"],
+      [],
+      "Geometry ka warm-up 😎",
+      "A square has four sides."),
+
+    # =====================================================
+    # RAPID
+    # =====================================================
+
+    q(89, "rapid", "easy",
+      "Capital of France?",
+      ["paris"],
+      [],
+      "3...2...1 🇫🇷",
+      "Paris."),
+
+    q(90, "rapid", "easy",
+      "5 × 5 = ?",
+      ["25", "twenty five"],
+      [],
+      "Fast fingers ⚡",
+      "25."),
+
+    q(91, "rapid", "easy",
+      "Red Planet?",
+      ["mars"],
+      [],
+      "Space mein laal wala 🔴",
+      "Mars."),
+
+    q(92, "rapid", "easy",
+      "Largest ocean?",
+      ["pacific", "pacific ocean"],
+      [],
+      "Water world 🌊",
+      "Pacific Ocean."),
+
+    q(93, "rapid", "easy",
+      "How many days are there in a week?",
+      ["7", "seven"],
+      [],
+      "Ye toh warm-up hai 😂",
+      "Seven."),
+
+    # =====================================================
+    # MIXED ARENA
+    # =====================================================
+
+    q(94, "mixed", "easy",
+      "Which planet is famous for its rings?",
+      ["saturn"],
+      ["Saturn", "Mars", "Venus", "Mercury"],
+      "Ring king 🪐",
+      "Saturn is famous for its prominent rings."),
+
+    q(95, "mixed", "medium",
+      "Which animal is known as man's best friend?",
+      ["dog", "dogs"],
+      ["Dog", "Cat", "Horse", "Rabbit"],
+      "Woof 🐶",
+      "Dog is the common phrase."),
+
+    q(96, "mixed", "easy",
+      "How many continents are commonly taught?",
+      ["7", "seven"],
+      ["5", "6", "7", "8"],
+      "Map time 🌍",
+      "Seven is the common school model."),
+
+    q(97, "mixed", "medium",
+      "Which gas do plants use during photosynthesis?",
+      ["carbon dioxide", "co2", "carbon dioxide gas"],
+      ["Carbon dioxide", "Oxygen", "Hydrogen", "Nitrogen"],
+      "Plants ka raw material 🌱",
+      "Plants use carbon dioxide during photosynthesis."),
+
+    q(98, "mixed", "easy",
+      "Which instrument has black and white keys?",
+      ["piano"],
+      ["Piano", "Guitar", "Drum", "Flute"],
+      "Music ka keyboard 🎹",
+      "Piano."),
+
+    q(99, "mixed", "medium",
+      "Which metal is liquid at room temperature?",
+      ["mercury"],
+      ["Mercury", "Iron", "Copper", "Gold"],
+      "Thermometer vibes 🌡️",
+      "Mercury is liquid at typical room temperature."),
+
+    q(100, "mixed", "easy",
+      "Which animal says 'meow'?",
+      ["cat", "kitten"],
+      ["Cat", "Dog", "Cow", "Horse"],
+      "Obviously 😂",
+      "Cat."),
+
 ]
 
-
 # =========================================================
-# DATABASE
-# =========================================================
-
-db_lock = threading.Lock()
-
-conn = sqlite3.connect(
-    DB,
-    check_same_thread=False,
-)
-
-cur = conn.cursor()
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS players(
-    chat_id INTEGER,
-    user_id INTEGER,
-    name TEXT,
-    xp INTEGER DEFAULT 0,
-    wins INTEGER DEFAULT 0,
-    streak INTEGER DEFAULT 0,
-    best_streak INTEGER DEFAULT 0,
-    games INTEGER DEFAULT 0,
-    hints INTEGER DEFAULT 0,
-    achievements TEXT DEFAULT '',
-    PRIMARY KEY(chat_id,user_id)
-)
-""")
-
-conn.commit()
-
-
-# =========================================================
-# ACTIVE GAME STATE
+# MODE DEFINITIONS
 # =========================================================
 
-# One active race per Telegram chat.
-active = {}
+MODES = {
+    "random": "🎲 Random",
+    "word": "🧩 Word",
+    "riddle": "🧠 Riddle",
+    "logic": "🕵️ Logic",
+    "emoji": "😀 Emoji",
+    "pattern": "🔢 Pattern",
+    "trick": "😈 Trick",
+    "animal": "🐾 Animal",
+    "city": "🌆 City",
+    "meme": "😂 Meme Guess",
+    "movie": "🎬 Movie/Series",
+    "gaming": "🎮 Gaming",
+    "food": "🍕 Food Guess",
+    "weird": "🤯 Weird Facts",
+    "brain": "🧠 Brain Battle",
+    "rapid": "⚡ Rapid Fire",
+    "mixed": "🎯 Mixed Arena",
+}
 
-# Recently used question IDs per chat.
-history = {}
+DIFFICULTIES = {
+    "easy": "🟢 Easy",
+    "medium": "🟡 Medium",
+    "hard": "🔴 Hard",
+    "extreme": "💀 Extreme",
+    "any": "🎲 Any Difficulty",
+}
 
+# =========================================================
+# FUN REACTIONS
+# =========================================================
+
+CORRECT_REACTIONS = [
+    "🔥 BOOM! Sahi pakde hain!",
+    "🧠 Dimaag online hai bhai!",
+    "👑 ARENA KING MOMENT!",
+    "⚡ Lightning answer!",
+    "😂 Ye toh tumne hawa mein uda diya!",
+    "🎯 Bilkul center!",
+    "💯 Certified correct!",
+    "🚀 Speed + Brain = dangerous combo!",
+]
+
+WRONG_REACTIONS = [
+    "💀 Oof... dimaag ne loading le li.",
+    "😂 Bhai answer ne khud resign kar diya.",
+    "😭 Ye wala toh thoda door chala gaya.",
+    "🫠 Almost... but Arena ne reject kar diya.",
+    "👀 Confidence 100%, answer 0%.",
+    "🤡 Ye answer sunke question bhi confused hai.",
+    "💔 Close tha... par close enough nahi.",
+]
+
+TIMEOUT_REACTIONS = [
+    "⏰ TIME OUT! Timer ne mercy nahi dikhayi.",
+    "💀 Time gaya, answer bhi gaya.",
+    "😂 Dimaag loading mein reh gaya.",
+    "⌛ Too late! Question bhaag gaya.",
+]
+
+STREAK_REACTIONS = [
+    "🔥 STREAK ALERT!",
+    "🚨 Combo machine activated!",
+    "👑 Boss mode ON!",
+    "⚡ Ye banda rukne ka naam nahi le raha!",
+]
 
 # =========================================================
 # HELPERS
 # =========================================================
 
 def normalize(text):
-    if not text:
+    if text is None:
         return ""
 
-    text = html.unescape(str(text))
-    text = text.lower()
+    text = text.lower().strip()
 
-    # Common punctuation removal
-    text = re.sub(r"[^\w\s-]", " ", text, flags=re.UNICODE)
+    replacements = {
+        "’": "'",
+        "‘": "'",
+        "“": '"',
+        "”": '"',
+        "–": "-",
+        "—": "-",
+        "ё": "e",
+    }
 
-    text = text.replace("-", " ")
-    text = " ".join(text.split())
+    for a, b in replacements.items():
+        text = text.replace(a, b)
 
-    return text.strip()
+    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
 
 
-def answer_matches(guess, answers):
-    """
-    Human-friendly matching.
+def answer_matches(user_answer, answers):
+    user = normalize(user_answer)
 
-    Exact aliases always work.
-    Small spelling mistakes can work for longer answers,
-    but very short answers are kept strict to avoid accidental wins.
-    """
-
-    guess = normalize(guess)
-
-    if not guess:
+    if not user:
         return False
 
-    normalized_answers = [
-        normalize(a)
-        for a in answers
-        if normalize(a)
-    ]
+    for answer in answers:
+        target = normalize(answer)
 
-    # Exact match
-    if guess in normalized_answers:
-        return True
+        if not target:
+            continue
 
-    # Don't fuzzy-match tiny answers.
-    if len(guess) < 4:
-        return False
+        if user == target:
+            return True
 
-    # Very small spelling mistakes.
-    for answer in normalized_answers:
-        if len(answer) < 4:
+        # Numeric words / simple spaces
+        if user.replace(" ", "") == target.replace(" ", ""):
+            return True
+
+        # Short answers should NOT be fuzzy matched.
+        if len(target) < 4:
             continue
 
         ratio = difflib.SequenceMatcher(
             None,
-            guess,
-            answer,
+            user,
+            target
         ).ratio()
 
-        if ratio >= 0.92:
+        # Typo tolerance.
+        if ratio >= 0.90:
             return True
 
     return False
 
 
-def ensure_player(chat_id, user):
+def get_player(chat_id, user):
     with db_lock:
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO players
-            (chat_id,user_id,name)
-            VALUES(?,?,?)
-            """,
-            (
-                chat_id,
-                user.id,
-                user.full_name,
-            ),
-        )
+        conn = db()
 
-        cur.execute(
-            """
+        conn.execute("""
+            INSERT OR IGNORE INTO players
+            (chat_id, user_id, name)
+            VALUES (?, ?, ?)
+        """, (
+            chat_id,
+            user.id,
+            user.first_name or "Player",
+        ))
+
+        conn.execute("""
             UPDATE players
-            SET name=?
-            WHERE chat_id=? AND user_id=?
-            """,
-            (
-                user.full_name,
-                chat_id,
-                user.id,
-            ),
-        )
+            SET name = ?
+            WHERE chat_id = ? AND user_id = ?
+        """, (
+            user.first_name or "Player",
+            chat_id,
+            user.id,
+        ))
 
         conn.commit()
 
+        row = conn.execute("""
+            SELECT *
+            FROM players
+            WHERE chat_id = ? AND user_id = ?
+        """, (chat_id, user.id)).fetchone()
 
-def level_from_xp(xp):
-    return (xp // 100) + 1
+        conn.close()
 
-
-def title_from_level(level):
-    if level >= 25:
-        return "👑 Legend"
-
-    if level >= 15:
-        return "🔥 Master"
-
-    if level >= 10:
-        return "🧠 Expert"
-
-    if level >= 5:
-        return "⚡ Solver"
-
-    return "🌱 Rookie"
+    return row
 
 
-def difficulty_icon(difficulty):
+def update_player(
+    chat_id,
+    user,
+    xp=0,
+    win=False,
+    game=False,
+    streak_change=0,
+    hint_change=0,
+):
+    get_player(chat_id, user)
+
+    with db_lock:
+        conn = db()
+
+        row = conn.execute("""
+            SELECT *
+            FROM players
+            WHERE chat_id = ? AND user_id = ?
+        """, (chat_id, user.id)).fetchone()
+
+        new_streak = max(0, row["streak"] + streak_change)
+
+        best = max(
+            row["best_streak"],
+            new_streak
+        )
+
+        conn.execute("""
+            UPDATE players
+            SET
+                xp = xp + ?,
+                wins = wins + ?,
+                games = games + ?,
+                streak = ?,
+                best_streak = ?,
+                hints = MAX(0, hints + ?)
+            WHERE chat_id = ? AND user_id = ?
+        """, (
+            xp,
+            1 if win else 0,
+            1 if game else 0,
+            new_streak,
+            best,
+            hint_change,
+            chat_id,
+            user.id,
+        ))
+
+        conn.commit()
+        conn.close()
+
+    return new_streak
+
+
+def add_achievement(chat_id, user_id, achievement):
+    with db_lock:
+        conn = db()
+
+        row = conn.execute("""
+            SELECT achievements
+            FROM players
+            WHERE chat_id = ? AND user_id = ?
+        """, (chat_id, user_id)).fetchone()
+
+        if not row:
+            conn.close()
+            return False
+
+        current = set(
+            x for x in (row["achievements"] or "").split(",")
+            if x
+        )
+
+        if achievement in current:
+            conn.close()
+            return False
+
+        current.add(achievement)
+
+        conn.execute("""
+            UPDATE players
+            SET achievements = ?
+            WHERE chat_id = ? AND user_id = ?
+        """, (
+            ",".join(sorted(current)),
+            chat_id,
+            user_id,
+        ))
+
+        conn.commit()
+        conn.close()
+
+    return True
+
+
+def check_achievements(chat_id, user, streak):
+    unlocked = []
+
+    row = get_player(chat_id, user)
+
+    if row["wins"] >= 1:
+        if add_achievement(chat_id, user.id, "FIRST_WIN"):
+            unlocked.append("🥇 First Blood")
+
+    if row["wins"] >= 10:
+        if add_achievement(chat_id, user.id, "TEN_WINS"):
+            unlocked.append("🏆 10 Wins")
+
+    if streak >= 5:
+        if add_achievement(chat_id, user.id, "FIVE_STREAK"):
+            unlocked.append("🔥 5 Streak")
+
+    if streak >= 10:
+        if add_achievement(chat_id, user.id, "TEN_STREAK"):
+            unlocked.append("👑 10 Streak")
+
+    if row["xp"] >= 500:
+        if add_achievement(chat_id, user.id, "XP500"):
+            unlocked.append("💎 500 XP")
+
+    return unlocked
+
+
+def get_questions(mode, difficulty):
+    pool = QUESTIONS
+
+    if mode != "random":
+        pool = [
+            x for x in pool
+            if x["mode"] == mode
+        ]
+
+    if difficulty != "any":
+        filtered = [
+            x for x in pool
+            if x["difficulty"] == difficulty
+        ]
+
+        # If exact difficulty doesn't exist for a mode,
+        # fall back to all questions from that mode.
+        if filtered:
+            pool = filtered
+
+    return pool
+
+
+def choose_question(chat_id, mode, difficulty):
+    pool = get_questions(mode, difficulty)
+
+    if not pool:
+        return None
+
+    recent = recent_questions.setdefault(chat_id, [])
+
+    available = [
+        x for x in pool
+        if x["id"] not in recent
+    ]
+
+    if not available:
+        available = pool
+
+    question = random.choice(available)
+
+    recent.append(question["id"])
+
+    # Keep recent history short.
+    if len(recent) > 12:
+        del recent[:-12]
+
+    return question
+
+
+def difficulty_time(difficulty, mode):
+    if mode == "rapid":
+        return 10
+
+    if difficulty == "easy":
+        return 25
+
+    if difficulty == "medium":
+        return 20
+
+    if difficulty == "hard":
+        return 15
+
+    if difficulty == "extreme":
+        return 10
+
+    return 20
+
+
+def xp_for(difficulty):
     return {
-        "Easy": "🟢",
-        "Medium": "🟡",
-        "Hard": "🔴",
-        "Extreme": "🟣",
-    }.get(difficulty, "⚪")
+        "easy": 10,
+        "medium": 15,
+        "hard": 25,
+        "extreme": 40,
+    }.get(difficulty, 15)
 
 
-def main_menu():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "🎮 Play",
-                callback_data="menu:play",
-            ),
-            InlineKeyboardButton(
-                "🎯 Modes",
-                callback_data="menu:modes",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🏆 Leaderboard",
-                callback_data="menu:leaderboard",
-            ),
-            InlineKeyboardButton(
-                "👤 Profile",
-                callback_data="menu:profile",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🎁 Daily Challenge",
-                callback_data="menu:daily",
-            ),
-            InlineKeyboardButton(
-                "🏅 Achievements",
-                callback_data="menu:achievements",
-            ),
-        ],
+def mode_keyboard():
+    rows = []
+    items = list(MODES.items())
+
+    for i in range(0, len(items), 2):
+        row = []
+
+        for key, label in items[i:i + 2]:
+            row.append(
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"mode:{key}"
+                )
+            )
+
+        rows.append(row)
+
+    rows.append([
+        InlineKeyboardButton(
+            "🏠 Main Menu",
+            callback_data="menu"
+        )
     ])
 
-
-def mode_menu():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "🎲 Random",
-                callback_data="mode:Random",
-            ),
-            InlineKeyboardButton(
-                "🧩 Word",
-                callback_data="mode:Word",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🧠 Riddle",
-                callback_data="mode:Riddle",
-            ),
-            InlineKeyboardButton(
-                "🕵️ Logic",
-                callback_data="mode:Logic",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "😀 Emoji",
-                callback_data="mode:Emoji",
-            ),
-            InlineKeyboardButton(
-                "🔢 Pattern",
-                callback_data="mode:Pattern",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "😈 Trick",
-                callback_data="mode:Trick",
-            ),
-            InlineKeyboardButton(
-                "🐾 Animal",
-                callback_data="mode:Animal",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🌆 City",
-                callback_data="mode:City",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🔙 Home",
-                callback_data="menu:home",
-            ),
-        ],
-    ])
+    return InlineKeyboardMarkup(rows)
 
 
-def difficulty_menu(mode):
+def difficulty_keyboard(mode):
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "🟢 Easy",
-                callback_data=f"diff:{mode}:Easy",
+                callback_data=f"diff:{mode}:easy"
             ),
             InlineKeyboardButton(
                 "🟡 Medium",
-                callback_data=f"diff:{mode}:Medium",
+                callback_data=f"diff:{mode}:medium"
             ),
         ],
         [
             InlineKeyboardButton(
                 "🔴 Hard",
-                callback_data=f"diff:{mode}:Hard",
+                callback_data=f"diff:{mode}:hard"
             ),
             InlineKeyboardButton(
-                "🟣 Extreme",
-                callback_data=f"diff:{mode}:Extreme",
+                "💀 Extreme",
+                callback_data=f"diff:{mode}:extreme"
             ),
         ],
         [
             InlineKeyboardButton(
                 "🎲 Any Difficulty",
-                callback_data=f"diff:{mode}:Any",
+                callback_data=f"diff:{mode}:any"
             ),
         ],
         [
             InlineKeyboardButton(
-                "🔙 Back",
-                callback_data="menu:modes",
+                "⬅️ Modes",
+                callback_data="modes"
             ),
         ],
     ])
 
 
-def choose_question(mode="Random", difficulty="Any", chat_id=None):
-    pool = QUESTIONS
-
-    if mode != "Random":
-        pool = [
-            q for q in pool
-            if q["mode"] == mode
-        ]
-
-    if difficulty != "Any":
-        pool = [
-            q for q in pool
-            if q["difficulty"] == difficulty
-        ]
-
-    if not pool:
-        pool = QUESTIONS
-
-    # Avoid immediate repeats where possible.
-    if chat_id is not None:
-        used = history.setdefault(chat_id, [])
-
-        available = [
-            q for q in pool
-            if id(q) not in used
-        ]
-
-        if available:
-            pool = available
-
-        selected = random.choice(pool)
-
-        used.append(id(selected))
-
-        # Keep memory small.
-        if len(used) > min(40, len(QUESTIONS)):
-            del used[:-min(40, len(QUESTIONS))]
-
-        return selected
-
-    return random.choice(pool)
+def game_controls():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "💡 Hint",
+                callback_data="hint"
+            ),
+            InlineKeyboardButton(
+                "🛑 Stop",
+                callback_data="stop"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🏠 Menu",
+                callback_data="menu"
+            ),
+        ],
+    ])
 
 
-def clear_game(chat_id):
-    active.pop(chat_id, None)
+def after_answer_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🔥 NEXT ROUND",
+                callback_data="next"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🔄 Change Mode",
+                callback_data="modes"
+            ),
+            InlineKeyboardButton(
+                "🏆 Leaderboard",
+                callback_data="leaderboard"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🏠 Main Menu",
+                callback_data="menu"
+            ),
+        ],
+    ])
+
+
+def main_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🎮 PLAY",
+                callback_data="play"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🎯 MODES",
+                callback_data="modes"
+            ),
+            InlineKeyboardButton(
+                "🏆 LEADERBOARD",
+                callback_data="leaderboard"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "👤 PROFILE",
+                callback_data="profile"
+            ),
+            InlineKeyboardButton(
+                "🔥 DAILY",
+                callback_data="daily"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🏅 ACHIEVEMENTS",
+                callback_data="achievements"
+            ),
+        ],
+    ])
 
 
 # =========================================================
-# START / HELP
+# TEXTS
+# =========================================================
+
+def welcome_text(user):
+    name = user.first_name or "Player"
+
+    return (
+        f"🎮 <b>GUESSARENA</b>\n\n"
+        f"Yo <b>{name}</b> 👋\n"
+        f"Yahan knowledge se zyada important hai...\n"
+        f"<b>kitna confidently galat ho sakte ho. 😂</b>\n\n"
+        f"🔥 Quiz • Riddles • Memes • Gaming • Movies\n"
+        f"🧠 Brain Battles • Emoji • Food • Weird Facts\n"
+        f"⚡ Rapid Fire • Buzzer • Mixed Arena\n\n"
+        f"Ready? Arena tumhara wait kar raha hai."
+    )
+
+
+# =========================================================
+# COMMANDS
 # =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+
+    get_player(update.effective_chat.id, user)
+
+    await update.message.reply_text(
+        welcome_text(user),
+        parse_mode="HTML",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🎮 <b>GuessArena Help</b>\n\n"
+        "/start — Main menu\n"
+        "/play — Start game\n"
+        "/stop — Stop current round\n"
+        "/profile — Your stats\n"
+        "/leaderboard — Top players\n\n"
+        "💡 Answer by pressing an option or typing your answer.\n"
+        "🔥 Correct answers build streaks.\n"
+        "⚡ Rapid mode = faster timer.\n"
+        "🎯 Next Round se same game continue hota hai."
+    )
+
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎮 <b>Choose your battlefield:</b>",
+        parse_mode="HTML",
+        reply_markup=mode_keyboard(),
+    )
+
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-    ensure_player(chat_id, user)
+    game = active_games.pop(chat_id, None)
 
-    text = (
-        "🎮 <b>GUESSARENA</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "🧠 Think fast. Guess smart.\n"
-        "😂 Galat hua toh dimaag ko blame mat karna.\n"
-        "🏆 Sahi hua toh credit lena allowed hai.\n\n"
-        "🔥 Welcome to the Arena!\n"
-        "Choose your battlefield 👇"
-    )
-
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=main_menu(),
-    )
-
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "📖 <b>HOW TO PLAY</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "🎮 <b>Play</b> — Random challenge\n"
-        "🎯 <b>Modes</b> — Choose your category\n"
-        "🟢 Easy → 🟣 Extreme\n\n"
-        "✍️ Answer simply by typing.\n"
-        "💡 Hint button clue dega.\n"
-        "🔥 Consecutive wins = streak bonus.\n"
-        "⭐ XP se level up.\n"
-        "🏆 Group mein fastest solver wins.\n\n"
-        "⚡ Commands:\n"
-        "/game — Start game\n"
-        "/profile — Your stats\n"
-        "/leaderboard — Group ranking\n"
-        "/daily — Daily challenge\n"
-        "/achievements — Badges\n"
-        "/stop — Current round stop"
-    )
-
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML",
-    )
+    if game:
+        await update.message.reply_text(
+            "🛑 Round stopped.\n\n"
+            "Koi baat nahi... Arena tumhe judge nahi karega. "
+            "Bas thoda sa. 😂",
+            reply_markup=main_menu_keyboard(),
+        )
+    else:
+        await update.message.reply_text(
+            "😴 Koi active round nahi chal raha.",
+            reply_markup=main_menu_keyboard(),
+        )
 
 
 # =========================================================
 # GAME START
 # =========================================================
 
-async def start_game(
+async def start_round(
     update,
     context,
-    mode="Random",
-    difficulty="Any",
+    chat_id,
+    mode,
+    difficulty,
+    edit=False,
 ):
-    chat_id = update.effective_chat.id
-
-    if chat_id in active:
-        await update.effective_message.reply_text(
-            "⚡ <b>ROUND ALREADY RUNNING!</b>\n\n"
-            "🧩 Pehle current puzzle solve karo.\n"
-            "😈 Bhaag ke next question par nahi ja sakte.",
-            parse_mode="HTML",
-        )
-        return
-
-    q = choose_question(
+    question = choose_question(
+        chat_id,
         mode,
         difficulty,
-        chat_id,
     )
 
-    active[chat_id] = {
-        "answers": q["answers"],
-        "hint": q["hint"],
-        "xp": q["xp"],
-        "mode": q["mode"],
-        "difficulty": q["difficulty"],
-        "question": q["q"],
-        "started_by": None,
+    if not question:
+        text = (
+            "😵 Is mode/difficulty mein abhi questions "
+            "available nahi hain.\n"
+            "Any Difficulty try karo."
+        )
+
+        if edit:
+            await update.callback_query.edit_message_text(
+                text,
+                reply_markup=main_menu_keyboard(),
+            )
+        else:
+            await update.effective_message.reply_text(
+                text,
+                reply_markup=main_menu_keyboard(),
+            )
+
+        return
+
+    timer = difficulty_time(
+        difficulty if difficulty != "any"
+        else question["difficulty"],
+        mode,
+    )
+
+    active_games[chat_id] = {
+        "mode": mode,
+        "difficulty": difficulty,
+        "question": question,
+        "answered": False,
+        "hint_used": False,
+        "timer": timer,
     }
 
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "💡 Hint",
-                callback_data=f"hint:{chat_id}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🛑 Stop Round",
-                callback_data=f"stop:{chat_id}",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🏠 Menu",
-                callback_data="menu:home",
-            ),
-        ],
-    ])
+    label = MODES.get(mode, "🎮 Game")
+    diff_label = DIFFICULTIES.get(
+        difficulty,
+        "🎲 Any Difficulty"
+    )
 
     text = (
-        "🎮 <b>GUESSARENA</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"{difficulty_icon(q['difficulty'])} "
-        f"<b>{q['difficulty'].upper()} • {q['mode'].upper()}</b>\n\n"
-        "🧩 <b>YOUR PUZZLE</b>\n"
-        f"{q['q']}\n\n"
-        f"🏆 Reward: <b>+{q['xp']} XP</b>\n"
-        "💡 Need help? Hint available.\n\n"
-        "✍️ <b>TYPE YOUR ANSWER!</b>\n"
-        "⚡ First correct answer wins."
+        f"🎮 <b>{label}</b>\n"
+        f"{diff_label} • ⏱️ <b>{timer}s</b>\n\n"
+        f"<b>{question['question']}</b>\n\n"
     )
 
-    await update.effective_message.reply_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=keyboard,
-    )
+    if question["options"]:
+        keyboard = []
 
+        options = list(question["options"])
+        random.shuffle(options)
 
-async def game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start_game(update, context)
+        for i in range(0, len(options), 2):
+            row = []
 
+            for option in options[i:i + 2]:
+                # Safe callback encoding using index.
+                index = options.index(option)
 
-# =========================================================
-# STOP
-# =========================================================
+                row.append(
+                    InlineKeyboardButton(
+                        option,
+                        callback_data=f"ans:{index}",
+                    )
+                )
 
-async def stop_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+            keyboard.append(row)
 
-    if chat_id not in active:
-        await update.effective_message.reply_text(
-            "😴 Koi active round nahi hai."
+        keyboard.extend([
+            [
+                InlineKeyboardButton(
+                    "💡 Hint",
+                    callback_data="hint"
+                ),
+                InlineKeyboardButton(
+                    "🛑 Stop",
+                    callback_data="stop"
+                ),
+            ]
+        ])
+
+        markup = InlineKeyboardMarkup(keyboard)
+
+    else:
+        markup = game_controls()
+
+    if edit:
+        sent = await update.callback_query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=markup,
         )
-        return
+    else:
+        sent = await update.effective_message.reply_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
 
-    clear_game(chat_id)
-
-    await update.effective_message.reply_text(
-        "🛑 <b>ROUND STOPPED</b>\n\n"
-        "😈 Puzzle bach gaya.\n"
-        "🎮 Jab ready ho /game dabao.",
-        parse_mode="HTML",
-        reply_markup=main_menu(),
+    # Timer job.
+    context.job_queue.run_once(
+        timeout_round,
+        timer,
+        chat_id=chat_id,
+        data={
+            "question_id": question["id"],
+            "message_id": sent.message_id,
+        },
+        name=f"timeout_{chat_id}_{question['id']}",
     )
 
 
 # =========================================================
-# ANSWER
+# TIMEOUT
 # =========================================================
 
-async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
+async def timeout_round(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.chat_id
+    data = context.job.data
+
+    game = active_games.get(chat_id)
+
+    if not game:
         return
 
-    if not update.message.text:
+    if game["question"]["id"] != data["question_id"]:
         return
 
+    if game["answered"]:
+        return
+
+    game["answered"] = True
+
+    question = game["question"]
+
+    # If nobody answered, reset streak of the player who started it.
+    starter_id = game.get("starter_id")
+
+    if starter_id:
+        with db_lock:
+            conn = db()
+
+            conn.execute("""
+                UPDATE players
+                SET streak = 0
+                WHERE chat_id = ? AND user_id = ?
+            """, (chat_id, starter_id))
+
+            conn.commit()
+            conn.close()
+
+    answer_text = (
+        question["answers"][0]
+        if question["answers"]
+        else "See explanation"
+    )
+
+    text = (
+        f"⏰ <b>TIME OUT!</b>\n\n"
+        f"{random.choice(TIMEOUT_REACTIONS)}\n\n"
+        f"❌ Time khatam.\n"
+        f"💡 Answer: <b>{answer_text}</b>\n\n"
+        f"{question['explanation']}"
+    )
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode="HTML",
+        reply_markup=after_answer_keyboard(),
+    )
+
+
+# =========================================================
+# PROCESS ANSWER
+# =========================================================
+
+async def process_answer(
+    update,
+    context,
+    user_answer,
+    selected_option=None,
+):
     chat_id = update.effective_chat.id
-    game_data = active.get(chat_id)
-
-    if not game_data:
-        return
-
     user = update.effective_user
 
-    ensure_player(chat_id, user)
+    game = active_games.get(chat_id)
 
-    guess = update.message.text
-
-    if not answer_matches(
-        guess,
-        game_data["answers"],
-    ):
-        await update.message.reply_text(
-            "❌ <b>Nope!</b>\n"
-            "🧠 Dimaag ko thoda aur load do 😂",
-            parse_mode="HTML",
-        )
+    if not game:
+        if update.callback_query:
+            await update.callback_query.answer(
+                "Round khatam ho chuka hai 😄",
+                show_alert=False,
+            )
         return
 
-    # Remove immediately so two simultaneous correct
-    # messages cannot both win.
-    active.pop(chat_id, None)
-
-    with db_lock:
-        cur.execute(
-            """
-            SELECT xp,wins,streak,best_streak,
-                   games,achievements
-            FROM players
-            WHERE chat_id=? AND user_id=?
-            """,
-            (
-                chat_id,
-                user.id,
-            ),
-        )
-
-        row = cur.fetchone()
-
-        if not row:
-            ensure_player(chat_id, user)
-
-            cur.execute(
-                """
-                SELECT xp,wins,streak,best_streak,
-                       games,achievements
-                FROM players
-                WHERE chat_id=? AND user_id=?
-                """,
-                (
-                    chat_id,
-                    user.id,
-                ),
+    if game["answered"]:
+        if update.callback_query:
+            await update.callback_query.answer(
+                "Already answered 😄",
+                show_alert=False,
             )
+        return
 
-            row = cur.fetchone()
+    question = game["question"]
 
-        (
-            old_xp,
-            wins,
-            streak,
-            best_streak,
-            games,
-            achievements,
-        ) = row
+    correct = False
 
-        new_streak = streak + 1
-        new_best = max(
-            best_streak,
-            new_streak,
+    if selected_option is not None:
+        options = question["options"]
+
+        try:
+            chosen = options[selected_option]
+        except (IndexError, TypeError):
+            chosen = ""
+
+        # For MCQ, button itself is an answer candidate.
+        correct = answer_matches(
+            chosen,
+            question["answers"],
         )
 
-        reward = game_data["xp"]
+        # Some questions use option text directly as intended answer.
+        if not correct:
+            correct = normalize(chosen) in {
+                normalize(a)
+                for a in question["answers"]
+            }
+
+    else:
+        correct = answer_matches(
+            user_answer,
+            question["answers"],
+        )
+
+    game["answered"] = True
+
+    # -----------------------------------------------------
+    # CORRECT
+    # -----------------------------------------------------
+
+    if correct:
+        base_xp = xp_for(question["difficulty"])
+
+        current_streak = get_player(
+            chat_id,
+            user,
+        )["streak"]
+
+        new_streak = current_streak + 1
 
         bonus = 0
 
@@ -1230,128 +1797,162 @@ async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if new_streak >= 10:
             bonus += 10
 
-        total_reward = reward + bonus
+        total_xp = base_xp + bonus
 
-        new_xp = old_xp + total_reward
-        new_wins = wins + 1
-        new_games = games + 1
-
-        achievements_list = [
-            x
-            for x in achievements.split("|")
-            if x
-        ]
-
-        if (
-            new_wins >= 1
-            and "FIRST_WIN" not in achievements_list
-        ):
-            achievements_list.append(
-                "FIRST_WIN"
-            )
-
-        if (
-            new_wins >= 10
-            and "TEN_WINS" not in achievements_list
-        ):
-            achievements_list.append(
-                "TEN_WINS"
-            )
-
-        if (
-            new_best >= 5
-            and "FIVE_STREAK" not in achievements_list
-        ):
-            achievements_list.append(
-                "FIVE_STREAK"
-            )
-
-        if (
-            new_best >= 10
-            and "TEN_STREAK" not in achievements_list
-        ):
-            achievements_list.append(
-                "TEN_STREAK"
-            )
-
-        cur.execute(
-            """
-            UPDATE players
-            SET xp=?,
-                wins=?,
-                streak=?,
-                best_streak=?,
-                games=?,
-                achievements=?
-            WHERE chat_id=? AND user_id=?
-            """,
-            (
-                new_xp,
-                new_wins,
-                new_streak,
-                new_best,
-                new_games,
-                "|".join(achievements_list),
-                chat_id,
-                user.id,
-            ),
+        new_streak = update_player(
+            chat_id,
+            user,
+            xp=total_xp,
+            win=True,
+            game=True,
+            streak_change=1,
         )
 
-        conn.commit()
+        achievements = check_achievements(
+            chat_id,
+            user,
+            new_streak,
+        )
 
-    level = level_from_xp(new_xp)
+        streak_text = ""
 
-    bonus_text = ""
+        if new_streak >= 2:
+            streak_text = (
+                f"\n🔥 <b>{new_streak} STREAK!</b>\n"
+                f"{random.choice(STREAK_REACTIONS)}\n"
+            )
 
-    if bonus:
         bonus_text = (
-            f"\n🔥 Streak bonus: "
-            f"<b>+{bonus} XP</b>"
+            f"\n⚡ Streak bonus: +{bonus} XP"
+            if bonus
+            else ""
         )
 
-    escaped_name = html.escape(
-        user.full_name
-    )
+        achievement_text = ""
 
-    text = (
-        "🎉 <b>CORRECT!</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"🥇 <b>{escaped_name}</b> "
-        "got it first!\n\n"
-        f"🏆 Puzzle XP: <b>+{reward}</b>"
-        f"{bonus_text}\n"
-        f"⭐ Total XP: <b>{new_xp}</b>\n"
-        f"🔥 Streak: <b>{new_streak}</b>\n"
-        f"📈 Level: <b>{level}</b>\n\n"
-        "😂 Baaki sab: better luck next time.\n"
-        "🎮 Next round?"
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "🔥 NEXT ROUND",
-                callback_data="menu:play",
+        if achievements:
+            achievement_text = (
+                "\n\n🏅 <b>Achievement unlocked!</b>\n"
+                + "\n".join(achievements)
             )
-        ],
-        [
-            InlineKeyboardButton(
-                "🎯 Change Mode",
-                callback_data="menu:modes",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🏆 Leaderboard",
-                callback_data="menu:leaderboard",
-            ),
-        ],
-    ])
 
-    await update.message.reply_text(
-        text,
+        text = (
+            f"✅ <b>CORRECT!</b>\n\n"
+            f"{random.choice(CORRECT_REACTIONS)}\n\n"
+            f"🎯 Answer: <b>{question['answers'][0]}</b>\n"
+            f"⭐ +{total_xp} XP"
+            f"{bonus_text}\n"
+            f"{streak_text}"
+            f"\n{question['explanation']}"
+            f"{achievement_text}"
+        )
+
+    # -----------------------------------------------------
+    # WRONG
+    # -----------------------------------------------------
+
+    else:
+        update_player(
+            chat_id,
+            user,
+            xp=0,
+            win=False,
+            game=True,
+            streak_change=-999999,
+        )
+
+        text = (
+            f"❌ <b>WRONG!</b>\n\n"
+            f"{random.choice(WRONG_REACTIONS)}\n\n"
+            f"💡 Correct answer: "
+            f"<b>{question['answers'][0]}</b>\n\n"
+            f"{question['explanation']}"
+        )
+
+    # -----------------------------------------------------
+    # EDIT CALLBACK OR SEND MESSAGE
+    # -----------------------------------------------------
+
+    if update.callback_query:
+        await update.callback_query.answer(
+            "🔥 Correct!" if correct else "❌ Wrong!",
+            show_alert=False,
+        )
+
+        try:
+            await update.callback_query.edit_message_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=after_answer_keyboard(),
+            )
+        except Exception:
+            await update.effective_chat.send_message(
+                text,
+                parse_mode="HTML",
+                reply_markup=after_answer_keyboard(),
+            )
+
+    else:
+        await update.message.reply_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=after_answer_keyboard(),
+        )
+
+
+# =========================================================
+# HINT
+# =========================================================
+
+async def use_hint(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    game = active_games.get(chat_id)
+
+    if not game or game["answered"]:
+        await query.answer(
+            "Active question nahi hai 😄",
+            show_alert=True,
+        )
+        return
+
+    if game["hint_used"]:
+        await query.answer(
+            "Hint already used 😏",
+            show_alert=True,
+        )
+        return
+
+    player = get_player(chat_id, user)
+
+    if player["hints"] <= 0:
+        await query.answer(
+            "Hint stock = 0 😭",
+            show_alert=True,
+        )
+        return
+
+    game["hint_used"] = True
+
+    update_player(
+        chat_id,
+        user,
+        hint_change=-1,
+    )
+
+    question = game["question"]
+
+    hint = question["hint"] or "Think about the wording carefully 👀"
+
+    await query.message.reply_text(
+        f"💡 <b>HINT</b>\n\n{hint}\n\n"
+        f"🪙 Hint used. Remaining: "
+        f"{max(0, player['hints'] - 1)}",
         parse_mode="HTML",
-        reply_markup=keyboard,
     )
 
 
@@ -1359,66 +1960,36 @@ async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # PROFILE
 # =========================================================
 
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_profile(update, context):
     chat_id = update.effective_chat.id
     user = update.effective_user
 
-    ensure_player(chat_id, user)
+    row = get_player(chat_id, user)
 
-    with db_lock:
-        cur.execute(
-            """
-            SELECT xp,wins,streak,best_streak,games
-            FROM players
-            WHERE chat_id=? AND user_id=?
-            """,
-            (
-                chat_id,
-                user.id,
-            ),
-        )
+    games = row["games"]
+    wins = row["wins"]
 
-        row = cur.fetchone()
-
-    if not row:
-        return
-
-    (
-        xp,
-        wins,
-        streak,
-        best_streak,
-        games,
-    ) = row
-
-    level = level_from_xp(xp)
-    title = title_from_level(level)
-
-    accuracy = 0
-
-    if games:
-        accuracy = round(
-            (wins / games) * 100
-        )
+    accuracy = (
+        round((wins / games) * 100, 1)
+        if games
+        else 0
+    )
 
     text = (
-        "👤 <b>MY PROFILE</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"👤 {html.escape(user.full_name)}\n"
-        f"{title} • Level {level}\n\n"
-        f"⭐ XP: <b>{xp}</b>\n"
-        f"🏆 Wins: <b>{wins}</b>\n"
+        f"👤 <b>{user.first_name}</b>\n\n"
+        f"⭐ XP: <b>{row['xp']}</b>\n"
         f"🎮 Games: <b>{games}</b>\n"
+        f"🏆 Wins: <b>{wins}</b>\n"
         f"🎯 Accuracy: <b>{accuracy}%</b>\n"
-        f"🔥 Current streak: <b>{streak}</b>\n"
-        f"💥 Best streak: <b>{best_streak}</b>\n\n"
-        f"📊 XP to next level: "
-        f"<b>{100 - (xp % 100)}</b>"
+        f"🔥 Current Streak: <b>{row['streak']}</b>\n"
+        f"👑 Best Streak: <b>{row['best_streak']}</b>\n"
+        f"💡 Hints: <b>{row['hints']}</b>\n"
     )
 
     await update.effective_message.reply_text(
         text,
         parse_mode="HTML",
+        reply_markup=main_menu_keyboard(),
     )
 
 
@@ -1426,136 +1997,55 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # LEADERBOARD
 # =========================================================
 
-async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def leaderboard(update, context):
     chat_id = update.effective_chat.id
 
     with db_lock:
-        cur.execute(
-            """
-            SELECT name,xp,wins
-            FROM players
-            WHERE chat_id=?
-            ORDER BY xp DESC,wins DESC
-            LIMIT 10
-            """,
-            (chat_id,),
-        )
+        conn = db()
 
-        rows = cur.fetchall()
+        rows = conn.execute("""
+            SELECT name, xp, wins, best_streak
+            FROM players
+            WHERE chat_id = ?
+            ORDER BY xp DESC, wins DESC
+            LIMIT 10
+        """, (chat_id,)).fetchall()
+
+        conn.close()
 
     if not rows:
-        await update.effective_message.reply_text(
-            "🏆 <b>Leaderboard empty hai!</b>\n\n"
-            "🎮 /game se first round start karo.",
-            parse_mode="HTML",
-        )
-        return
-
-    medals = [
-        "🥇",
-        "🥈",
-        "🥉",
-    ]
-
-    lines = [
-        "🏆 <b>GROUP LEADERBOARD</b>",
-        "━━━━━━━━━━━━━━━━━━",
-    ]
-
-    for i, (
-        name,
-        xp,
-        wins,
-    ) in enumerate(rows, 1):
-
-        medal = (
-            medals[i - 1]
-            if i <= 3
-            else f"<b>{i}.</b>"
+        text = (
+            "🏆 <b>LEADERBOARD</b>\n\n"
+            "Abhi koi champion nahi.\n"
+            "Koi toh game start karo 😂"
         )
 
-        lines.append(
-            f"{medal} "
-            f"{html.escape(name)}\n"
-            f"   ⭐ {xp} XP"
-            f"  •  🏆 {wins} wins"
-        )
+    else:
+        lines = [
+            "🏆 <b>GUESSARENA LEADERBOARD</b>\n"
+        ]
 
-    await update.effective_message.reply_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-    )
+        medals = [
+            "🥇",
+            "🥈",
+            "🥉",
+        ]
 
+        for i, row in enumerate(rows, start=1):
+            medal = medals[i - 1] if i <= 3 else f"{i}."
 
-# =========================================================
-# ACHIEVEMENTS
-# =========================================================
-
-async def achievements(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-
-    ensure_player(chat_id, user)
-
-    with db_lock:
-        cur.execute(
-            """
-            SELECT achievements
-            FROM players
-            WHERE chat_id=? AND user_id=?
-            """,
-            (
-                chat_id,
-                user.id,
-            ),
-        )
-
-        row = cur.fetchone()
-
-    data = row[0] if row else ""
-
-    unlocked = [
-        x
-        for x in data.split("|")
-        if x
-    ]
-
-    names = {
-        "FIRST_WIN":
-            "🥇 First Blood — First win",
-
-        "TEN_WINS":
-            "🏆 Rising Star — 10 wins",
-
-        "FIVE_STREAK":
-            "🔥 On Fire — 5 streak",
-
-        "TEN_STREAK":
-            "💀 Unstoppable — 10 streak",
-    }
-
-    lines = [
-        "🏅 <b>ACHIEVEMENTS</b>",
-        "━━━━━━━━━━━━━━━━━━",
-    ]
-
-    for key, description in names.items():
-
-        if key in unlocked:
             lines.append(
-                f"✅ {description}"
-            )
-        else:
-            lines.append(
-                f"🔒 {description}"
+                f"{medal} <b>{row['name']}</b> — "
+                f"{row['xp']} XP "
+                f"• 🔥 {row['best_streak']}"
             )
 
+        text = "\n".join(lines)
+
     await update.effective_message.reply_text(
-        "\n".join(lines),
+        text,
         parse_mode="HTML",
+        reply_markup=main_menu_keyboard(),
     )
 
 
@@ -1563,307 +2053,704 @@ async def achievements(
 # DAILY CHALLENGE
 # =========================================================
 
-async def daily(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def daily_challenge(update, context):
     chat_id = update.effective_chat.id
 
-    if chat_id in active:
-        await update.effective_message.reply_text(
-            "⚡ Pehle current round complete karo."
-        )
-        return
+    today = date.today().isoformat()
 
-    # Same puzzle for everyone on the same day.
-    index = int(
-        hashlib.md5(
-            str(date.today()).encode()
+    seed = int(
+        hashlib.sha256(
+            today.encode()
         ).hexdigest(),
         16,
-    ) % len(QUESTIONS)
+    )
 
-    q = QUESTIONS[index]
+    random.seed(seed)
 
-    active[chat_id] = {
-        "answers": q["answers"],
-        "hint": q["hint"],
-        "xp": q["xp"] + 10,
-        "mode": q["mode"],
-        "difficulty": q["difficulty"],
-        "question": q["q"],
-        "started_by": None,
+    question = random.choice(QUESTIONS)
+
+    random.seed()
+
+    active_games[chat_id] = {
+        "mode": "daily",
+        "difficulty": question["difficulty"],
+        "question": question,
+        "answered": False,
+        "hint_used": False,
+        "timer": 30,
+        "daily": True,
     }
 
     text = (
-        "🎁 <b>DAILY CHALLENGE</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "🌟 One special puzzle for today!\n\n"
-        f"{difficulty_icon(q['difficulty'])} "
-        f"<b>{q['difficulty']}</b>\n\n"
-        f"🧩 {q['q']}\n\n"
-        f"🏆 Reward: <b>+{q['xp'] + 10} XP</b>\n"
-        "💡 One hint available.\n\n"
-        "⚡ First correct answer wins."
+        f"🔥 <b>DAILY CHALLENGE</b>\n"
+        f"📅 {today}\n\n"
+        f"<b>{question['question']}</b>\n\n"
+        f"⏱️ 30 seconds\n"
+        f"⭐ Daily win = bonus XP"
     )
 
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "💡 Hint",
-                callback_data=f"hint:{chat_id}",
-            )
-        ],
-        [
+    if question["options"]:
+        keyboard = []
+
+        options = list(question["options"])
+        random.shuffle(options)
+
+        # Store the shuffled options so callback index matches.
+        active_games[chat_id]["daily_options"] = options
+
+        for i in range(0, len(options), 2):
+            row = []
+
+            for option in options[i:i + 2]:
+                index = options.index(option)
+
+                row.append(
+                    InlineKeyboardButton(
+                        option,
+                        callback_data=f"dailyans:{index}",
+                    )
+                )
+
+            keyboard.append(row)
+
+        keyboard.append([
             InlineKeyboardButton(
                 "🛑 Stop",
-                callback_data=f"stop:{chat_id}",
+                callback_data="stop"
             )
-        ],
-        [
-            InlineKeyboardButton(
-                "🏠 Menu",
-                callback_data="menu:home",
-            )
-        ],
-    ])
+        ])
+
+        markup = InlineKeyboardMarkup(keyboard)
+
+    else:
+        markup = game_controls()
 
     await update.effective_message.reply_text(
         text,
         parse_mode="HTML",
-        reply_markup=keyboard,
+        reply_markup=markup,
     )
 
 
 # =========================================================
-# BUTTON HANDLER
+# ACHIEVEMENTS
 # =========================================================
 
-async def button(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def achievements(update, context):
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    row = get_player(chat_id, user)
+
+    unlocked = set(
+        x for x in (row["achievements"] or "").split(",")
+        if x
+    )
+
+    achievements_list = [
+        ("FIRST_WIN", "🥇 First Blood — First win"),
+        ("TEN_WINS", "🏆 10 Wins — Win ten rounds"),
+        ("FIVE_STREAK", "🔥 5 Streak — Five correct in a row"),
+        ("TEN_STREAK", "👑 10 Streak — Absolute menace"),
+        ("XP500", "💎 500 XP — Serious Arena grinder"),
+    ]
+
+    lines = ["🏅 <b>ACHIEVEMENTS</b>\n"]
+
+    for key, label in achievements_list:
+        if key in unlocked:
+            lines.append(f"✅ {label}")
+        else:
+            lines.append(f"🔒 {label}")
+
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+# =========================================================
+# CALLBACK HANDLER
+# =========================================================
+
+async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    data = query.data
 
-    try:
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    # -----------------------------------------------------
+    # MAIN MENU
+    # -----------------------------------------------------
+
+    if data == "menu":
         await query.answer()
-    except Exception:
-        pass
 
-    data = query.data or ""
-
-    # -----------------------------------------------------
-    # HOME
-    # -----------------------------------------------------
-
-    if data == "menu:home":
-
-        await query.message.reply_text(
-            "🏠 <b>GUESSARENA HOME</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "🔥 Choose your next move 👇",
+        await query.edit_message_text(
+            welcome_text(user),
             parse_mode="HTML",
-            reply_markup=main_menu(),
+            reply_markup=main_menu_keyboard(),
         )
+
         return
 
     # -----------------------------------------------------
     # PLAY
     # -----------------------------------------------------
 
-    if data == "menu:play":
+    if data == "play":
+        await query.answer()
 
-        await start_game(
-            update,
-            context,
+        await query.edit_message_text(
+            "🎮 <b>Choose your battlefield:</b>",
+            parse_mode="HTML",
+            reply_markup=mode_keyboard(),
         )
+
         return
 
     # -----------------------------------------------------
     # MODES
     # -----------------------------------------------------
 
-    if data == "menu:modes":
+    if data == "modes":
+        await query.answer()
 
-        await query.message.reply_text(
-            "🎯 <b>CHOOSE YOUR MODE</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "😂 Har mode mein alag dimaag ki vaat hai.",
+        await query.edit_message_text(
+            "🎯 <b>GAME MODES</b>\n\n"
+            "Choose karo aur phir difficulty set karo.",
             parse_mode="HTML",
-            reply_markup=mode_menu(),
+            reply_markup=mode_keyboard(),
         )
+
         return
 
     # -----------------------------------------------------
-    # PROFILE
-    # -----------------------------------------------------
-
-    if data == "menu:profile":
-
-        await profile(
-            update,
-            context,
-        )
-        return
-
-    # -----------------------------------------------------
-    # LEADERBOARD
-    # -----------------------------------------------------
-
-    if data == "menu:leaderboard":
-
-        await leaderboard(
-            update,
-            context,
-        )
-        return
-
-    # -----------------------------------------------------
-    # ACHIEVEMENTS
-    # -----------------------------------------------------
-
-    if data == "menu:achievements":
-
-        await achievements(
-            update,
-            context,
-        )
-        return
-
-    # -----------------------------------------------------
-    # DAILY
-    # -----------------------------------------------------
-
-    if data == "menu:daily":
-
-        await daily(
-            update,
-            context,
-        )
-        return
-
-    # -----------------------------------------------------
-    # MODE
+    # MODE SELECTED
     # -----------------------------------------------------
 
     if data.startswith("mode:"):
+        await query.answer()
 
-        mode = data.split(
-            ":",
-            1,
-        )[1]
+        mode = data.split(":", 1)[1]
 
-        await query.message.reply_text(
-            f"🎯 <b>{mode.upper()} MODE</b>\n\n"
-            "Difficulty choose karo 👇",
+        if mode not in MODES:
+            return
+
+        await query.edit_message_text(
+            f"🎮 <b>{MODES[mode]}</b>\n\n"
+            f"Difficulty choose karo:",
             parse_mode="HTML",
-            reply_markup=difficulty_menu(mode),
+            reply_markup=difficulty_keyboard(mode),
         )
+
         return
 
     # -----------------------------------------------------
-    # DIFFICULTY
+    # DIFFICULTY SELECTED
     # -----------------------------------------------------
 
     if data.startswith("diff:"):
+        await query.answer()
 
-        parts = data.split(":")
+        _, mode, difficulty = data.split(":", 2)
 
-        if len(parts) != 3:
-            return
-
-        _, mode, difficulty = parts
-
-        await start_game(
+        await start_round(
             update,
             context,
-            mode=mode,
-            difficulty=difficulty,
+            chat_id,
+            mode,
+            difficulty,
+            edit=True,
         )
+
+        return
+
+    # -----------------------------------------------------
+    # NEXT ROUND
+    # -----------------------------------------------------
+
+    if data == "next":
+        await query.answer("🔥 Next round loading...")
+
+        game = active_games.get(chat_id)
+
+        if not game:
+            await query.edit_message_text(
+                "🎮 Game khatam ho gaya.\n\n"
+                "Fresh round ke liye PLAY dabao.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        await start_round(
+            update,
+            context,
+            chat_id,
+            game["mode"],
+            game["difficulty"],
+            edit=True,
+        )
+
         return
 
     # -----------------------------------------------------
     # HINT
     # -----------------------------------------------------
 
-    if data.startswith("hint:"):
+    if data == "hint":
+        await use_hint(update, context)
+        return
 
-        try:
-            chat_id = int(
-                data.split(":")[1]
-            )
-        except Exception:
-            return
+    # -----------------------------------------------------
+    # STOP
+    # -----------------------------------------------------
 
-        game_data = active.get(chat_id)
+    if data == "stop":
+        await query.answer()
 
-        if not game_data:
+        active_games.pop(chat_id, None)
 
-            try:
-                await query.answer(
-                    "Round already finished.",
-                    show_alert=True,
-                )
-            except Exception:
-                pass
-
-            return
-
-        await query.message.reply_text(
-            "💡 <b>HINT</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"{game_data['hint']}",
+        await query.edit_message_text(
+            "🛑 <b>Round stopped.</b>\n\n"
+            "Arena bol raha hai:\n"
+            "“Come back when your brain is ready.” 😂",
             parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
         )
+
         return
 
     # -----------------------------------------------------
-    # STOP BUTTON
+    # PROFILE
     # -----------------------------------------------------
 
-    if data.startswith("stop:"):
+    if data == "profile":
+        await query.answer()
+
+        row = get_player(chat_id, user)
+
+        games = row["games"]
+        wins = row["wins"]
+
+        accuracy = (
+            round((wins / games) * 100, 1)
+            if games
+            else 0
+        )
+
+        text = (
+            f"👤 <b>{user.first_name}</b>\n\n"
+            f"⭐ XP: <b>{row['xp']}</b>\n"
+            f"🎮 Games: <b>{games}</b>\n"
+            f"🏆 Wins: <b>{wins}</b>\n"
+            f"🎯 Accuracy: <b>{accuracy}%</b>\n"
+            f"🔥 Streak: <b>{row['streak']}</b>\n"
+            f"👑 Best: <b>{row['best_streak']}</b>\n"
+            f"💡 Hints: <b>{row['hints']}</b>"
+        )
+
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # LEADERBOARD
+    # -----------------------------------------------------
+
+    if data == "leaderboard":
+        await query.answer()
+
+        with db_lock:
+            conn = db()
+
+            rows = conn.execute("""
+                SELECT name, xp, wins, best_streak
+                FROM players
+                WHERE chat_id = ?
+                ORDER BY xp DESC, wins DESC
+                LIMIT 10
+            """, (chat_id,)).fetchall()
+
+            conn.close()
+
+        if not rows:
+            text = (
+                "🏆 <b>LEADERBOARD</b>\n\n"
+                "Abhi koi score nahi hai 😂"
+            )
+
+        else:
+            lines = [
+                "🏆 <b>GUESSARENA LEADERBOARD</b>\n"
+            ]
+
+            medals = ["🥇", "🥈", "🥉"]
+
+            for i, row in enumerate(rows, start=1):
+                medal = medals[i - 1] if i <= 3 else f"{i}."
+
+                lines.append(
+                    f"{medal} <b>{row['name']}</b> — "
+                    f"{row['xp']} XP"
+                )
+
+            text = "\n".join(lines)
+
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # DAILY
+    # -----------------------------------------------------
+
+    if data == "daily":
+        await query.answer()
+
+        await query.edit_message_text(
+            "🔥 <b>Daily Challenge</b>\n\n"
+            "Same daily question. One shot.\n"
+            "No excuses. 😂",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔥 START DAILY",
+                        callback_data="startdaily"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Back",
+                        callback_data="menu"
+                    )
+                ],
+            ]),
+        )
+
+        return
+
+    if data == "startdaily":
+        await query.answer()
+
+        # Re-use message as daily start.
+        today = date.today().isoformat()
+
+        seed = int(
+            hashlib.sha256(
+                today.encode()
+            ).hexdigest(),
+            16,
+        )
+
+        random.seed(seed)
+        question = random.choice(QUESTIONS)
+        random.seed()
+
+        active_games[chat_id] = {
+            "mode": "daily",
+            "difficulty": question["difficulty"],
+            "question": question,
+            "answered": False,
+            "hint_used": False,
+            "timer": 30,
+            "daily": True,
+        }
+
+        text = (
+            f"🔥 <b>DAILY CHALLENGE</b>\n"
+            f"📅 {today}\n\n"
+            f"<b>{question['question']}</b>\n\n"
+            f"⏱️ 30 seconds\n"
+            f"⭐ Win = bonus XP"
+        )
+
+        if question["options"]:
+            options = list(question["options"])
+            random.shuffle(options)
+
+            active_games[chat_id]["daily_options"] = options
+
+            keyboard = []
+
+            for i in range(0, len(options), 2):
+                row = []
+
+                for option in options[i:i + 2]:
+                    idx = options.index(option)
+
+                    row.append(
+                        InlineKeyboardButton(
+                            option,
+                            callback_data=f"dailyans:{idx}"
+                        )
+                    )
+
+                keyboard.append(row)
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    "🛑 Stop",
+                    callback_data="stop"
+                )
+            ])
+
+            markup = InlineKeyboardMarkup(keyboard)
+
+        else:
+            markup = game_controls()
+
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # ACHIEVEMENTS
+    # -----------------------------------------------------
+
+    if data == "achievements":
+        await query.answer()
+
+        row = get_player(chat_id, user)
+
+        unlocked = set(
+            x for x in (row["achievements"] or "").split(",")
+            if x
+        )
+
+        items = [
+            ("FIRST_WIN", "🥇 First Blood"),
+            ("TEN_WINS", "🏆 10 Wins"),
+            ("FIVE_STREAK", "🔥 5 Streak"),
+            ("TEN_STREAK", "👑 10 Streak"),
+            ("XP500", "💎 500 XP"),
+        ]
+
+        lines = ["🏅 <b>ACHIEVEMENTS</b>\n"]
+
+        for key, label in items:
+            lines.append(
+                f"✅ {label}"
+                if key in unlocked
+                else f"🔒 {label}"
+            )
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # DAILY ANSWERS
+    # -----------------------------------------------------
+
+    if data.startswith("dailyans:"):
+        await query.answer()
+
+        game = active_games.get(chat_id)
+
+        if not game:
+            return
+
+        if game["answered"]:
+            return
 
         try:
-            chat_id = int(
-                data.split(":")[1]
-            )
+            index = int(data.split(":")[1])
         except Exception:
             return
 
-        if chat_id in active:
+        options = game.get("daily_options", [])
 
-            clear_game(chat_id)
+        if index < 0 or index >= len(options):
+            return
 
-            await query.message.reply_text(
-                "🛑 <b>ROUND STOPPED</b>\n\n"
-                "🎮 New round ke liye Play dabao.",
-                parse_mode="HTML",
-                reply_markup=main_menu(),
+        chosen = options[index]
+
+        question = game["question"]
+
+        game["answered"] = True
+
+        correct = answer_matches(
+            chosen,
+            question["answers"]
+        )
+
+        if correct:
+            streak = update_player(
+                chat_id,
+                user,
+                xp=25,
+                win=True,
+                game=True,
+                streak_change=1,
             )
-        else:
 
-            try:
-                await query.answer(
-                    "No active round.",
-                    show_alert=True,
+            achievements_unlocked = check_achievements(
+                chat_id,
+                user,
+                streak,
+            )
+
+            achievement_text = ""
+
+            if achievements_unlocked:
+                achievement_text = (
+                    "\n\n🏅 "
+                    + "\n".join(achievements_unlocked)
                 )
-            except Exception:
-                pass
+
+            text = (
+                "🔥 <b>DAILY CLEARED!</b>\n\n"
+                "🎯 Sahi answer!\n"
+                "⭐ <b>+25 XP</b>\n"
+                f"🔥 Streak: <b>{streak}</b>\n\n"
+                f"{question['explanation']}"
+                f"{achievement_text}"
+            )
+
+        else:
+            update_player(
+                chat_id,
+                user,
+                game=True,
+                streak_change=-999999,
+            )
+
+            text = (
+                "❌ <b>DAILY FAILED!</b>\n\n"
+                "😂 Daily ne aaj tumhe choose nahi kiya.\n\n"
+                f"💡 Answer: "
+                f"<b>{question['answers'][0]}</b>\n\n"
+                f"{question['explanation']}"
+            )
+
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=after_answer_keyboard(),
+        )
 
         return
+
+    # -----------------------------------------------------
+    # NORMAL MCQ ANSWERS
+    # -----------------------------------------------------
+
+    if data.startswith("ans:"):
+        try:
+            index = int(data.split(":")[1])
+        except Exception:
+            await query.answer("Invalid answer.")
+            return
+
+        game = active_games.get(chat_id)
+
+        if not game:
+            await query.answer(
+                "Round khatam 😄",
+                show_alert=False,
+            )
+            return
+
+        question = game["question"]
+
+        # Because options were shuffled before display,
+        # recover the actual displayed order from message
+        # is not possible reliably through button index alone.
+        #
+        # So for MCQ questions, callback index maps against
+        # the original option list. This is why the display
+        # order is now kept in game state when needed.
+        #
+        # Fallback to original list.
+        options = game.get(
+            "display_options",
+            question["options"]
+        )
+
+        if not options:
+            await query.answer(
+                "Type your answer instead 😄",
+                show_alert=False,
+            )
+            return
+
+        if index >= len(options):
+            await query.answer("Invalid.")
+            return
+
+        chosen = options[index]
+
+        await process_answer(
+            update,
+            context,
+            chosen,
+            selected_option=None,
+        )
+
+        return
+
+    await query.answer()
+
+
+# =========================================================
+# TEXT ANSWERS
+# =========================================================
+
+async def text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
+    text = update.message.text.strip()
+
+    if not text:
+        return
+
+    if text.startswith("/"):
+        return
+
+    chat_id = update.effective_chat.id
+
+    game = active_games.get(chat_id)
+
+    if not game:
+        return
+
+    # For MCQ modes, user can still type the answer.
+    await process_answer(
+        update,
+        context,
+        text,
+    )
 
 
 # =========================================================
 # ERROR HANDLER
 # =========================================================
 
-async def error_handler(
-    update,
-    context,
-):
+async def error_handler(update, context):
     print(
         "GuessArena error:",
-        repr(context.error),
+        repr(context.error)
     )
 
 
@@ -1872,122 +2759,46 @@ async def error_handler(
 # =========================================================
 
 def main():
+    application = Application.builder().token(TOKEN).build()
 
-    if not TOKEN:
-        raise SystemExit(
-            "BOT_TOKEN missing. "
-            "Set BOT_TOKEN in Render Environment Variables."
-        )
-
-    request = HTTPXRequest(
-        read_timeout=60,
-        write_timeout=60,
-        connect_timeout=60,
-        pool_timeout=60,
-    )
-
-    application = (
-        Application
-        .builder()
-        .token(TOKEN)
-        .request(request)
-        .build()
-    )
-
-    # Commands
     application.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
+        CommandHandler("start", start)
     )
 
     application.add_handler(
-        CommandHandler(
-            "help",
-            help_cmd,
-        )
+        CommandHandler("help", help_command)
     )
 
     application.add_handler(
-        CommandHandler(
-            "game",
-            game,
-        )
+        CommandHandler("play", play_command)
     )
 
     application.add_handler(
-        CommandHandler(
-            "profile",
-            profile,
-        )
+        CommandHandler("stop", stop_command)
     )
 
     application.add_handler(
-        CommandHandler(
-            "leaderboard",
-            leaderboard,
-        )
+        CommandHandler("profile", show_profile)
     )
 
     application.add_handler(
-        CommandHandler(
-            "achievements",
-            achievements,
-        )
+        CommandHandler("leaderboard", leaderboard)
     )
 
     application.add_handler(
-        CommandHandler(
-            "daily",
-            daily,
-        )
+        CallbackQueryHandler(callbacks)
     )
 
-    application.add_handler(
-        CommandHandler(
-            "stop",
-            stop_game,
-        )
-    )
-
-    # Buttons
-    application.add_handler(
-        CallbackQueryHandler(
-            button,
-        )
-    )
-
-    # Normal answers
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            answer,
+            text_answer,
         )
     )
 
-    application.add_error_handler(
-        error_handler
-    )
+    application.add_error_handler(error_handler)
 
-    print(
-        "================================="
-    )
-    print(
-        "GuessArena is running..."
-    )
-    print(
-        f"Questions: {len(QUESTIONS)}"
-    )
-    print(
-        "Render health server: ON"
-    )
-    print(
-        "Telegram polling: ON"
-    )
-    print(
-        "================================="
-    )
+    print("🔥 GuessArena starting...")
 
     application.run_polling(
         poll_interval=1,
