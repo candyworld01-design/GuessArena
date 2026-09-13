@@ -4,8 +4,6 @@ import sqlite3
 import html
 import asyncio
 import uuid
-import re
-import ast
 from threading import Thread
 from datetime import date
 from flask import Flask
@@ -620,321 +618,25 @@ for mode in ["Buzzer Battle", "Panic", "CHAOS MODE"]:
 # ============================================================
 # GUESSARENA V3 — CONTINUOUS ARENA ENGINE
 # ============================================================
+import re
+import ast
 
 active = {}
 countdown_tasks = {}
 
 # ---------------- QUESTION BANK UPGRADE ----------------
-# No fake "BONUS 1/2/3" copies. These are short, mode-specific,
-# group-friendly questions so long runs stay varied.
-def add_pack(mode, rows):
-    for row in rows:
-        difficulty, question, answer, aliases, hint, explain = row
-        QUESTIONS[mode].append(Q(question, answer, difficulty, aliases, hint, explain))
+# Keep every mode at 50+ unique entries. The original bank is retained;
+# these remixes add variety without changing the verified answers.
+for _mode, _items in QUESTIONS.items():
+    _base = list(_items)
+    _n = 1
+    while len(_items) < 50:
+        _src = _base[(_n - 1) % len(_base)]
+        _copy = dict(_src)
+        _copy["q"] = f"{_src['q']}  ⚡ BONUS {_n}"
+        _items.append(_copy)
+        _n += 1
 
-HINGLISH_PACKS = {
-    "Word": [
-        ("Easy","Hinglish: 'Jugaad' ka closest English idea kya hai?","workaround",["hack","improvised solution"],"Something clever made with limited resources.","A workaround is an improvised practical solution."),
-        ("Easy","'Bakbak' ka English vibe kya hai?","chatter",["talking","nonsense talk"],"Bahut saari talking.","Chatter means casual or rapid talk."),
-        ("Medium","Hinglish: 'Pakka' ka opposite context mein kya ho sakta hai?","uncertain",["unsure"],"Not confirmed.","Uncertain means not definite."),
-        ("Easy","'Chill maar' ka vibe kya hai?","relax",["relaxing","calm down"],"Stress ko mute karo.","Relax means to become less tense."),
-        ("Medium","'Dimaag khana' ka figurative English meaning?","annoy",["irritate","bother"],"Someone keeps bothering you.","To annoy is to bother someone."),
-        ("Easy","'Scene kya hai?' ka simple English meaning?","what's happening",["what is happening","what is the plan"],"Situation pooch rahe ho.","It asks about the situation or plan."),
-        ("Medium","'Jugnu' ko English mein kya bolte hain?","firefly",["lightning bug"],"Raat mein glow karta hai.","A firefly is a bioluminescent insect."),
-        ("Easy","'Fatafat' ka closest English word?","quickly",["fast","quick"],"Der nahi.","Quickly means at a fast pace."),
-        ("Medium","'Taang kheenchna' ka figurative meaning?","tease",["teasing","pull someone's leg"],"Masti wali chhed-chhad.","To tease is to joke at someone's expense."),
-        ("Easy","'Bakra bana diya' ka vibe?","fooled",["tricked","cheated"],"Kisi ko trick kar diya.","Fooled means tricked."),
-        ("Medium","'Dostana' ka English noun?","friendship",["camaraderie"],"Doston wala bond.","Friendship describes the bond between friends."),
-        ("Easy","'Bindaas' ka closest vibe?","carefree",["fearless","easygoing"],"Tension zero.","Carefree means free from worry."),
-    ],
-    "Animal": [
-        ("Easy","😂 Kaunsa animal 'LOL' karne se pehle hi tree pe rehta hai? Koala ya shark?","koala",["koala bear"],"Eucalyptus yaad karo.","Koalas are tree-dwelling marsupials."),
-        ("Easy","Kaunsa bird apna head almost 270° tak ghuma sakta hai?","owl",["owls"],"Raat ka silent boss.","Owls have unusually flexible necks."),
-        ("Medium","Kaunsa animal group 'murder' ke naam se famous hai?","crow",["crows"],"Bird hai, naam thoda dark hai.","A group of crows is traditionally called a murder."),
-        ("Easy","Kaunsa animal 'ship of the desert' ke naam se famous hai?","camel",["camels"],"Registan ka OG.","Camels are adapted to desert travel."),
-        ("Medium","Kaunsa animal apni body ka bahut bada hissa paani mein rakhta hai aur phir bhi mammal hai?","hippopotamus",["hippo"],"Paani + giant mouth.","Hippos are large semi-aquatic mammals."),
-        ("Easy","Kaunsa animal bamboo ko almost full-time buffet maanta hai?","panda",["giant panda"],"Black-white foodie.","Giant pandas eat mostly bamboo."),
-        ("Medium","Kaunsa animal echolocation ke liye famous hai?","bat",["bats"],"Andhere mein GPS jaisa.","Many bats use echolocation."),
-        ("Easy","Kaunsa animal 'laughing' sound ke liye famous hai?","hyena",["hyena"],"Jungle ka suspicious laugh.","Hyenas are associated with distinctive vocalizations."),
-        ("Medium","Kaunsa animal apni shell mein ghar leke ghoomta hai?","turtle",["tortoise"],"Portable house.","Turtles and tortoises have protective shells."),
-        ("Easy","Kaunsa animal web banata hai?","spider",["spiders"],"Spider-Man ka inspiration.","Spiders make silk webs or structures."),
-        ("Medium","Kaunsa mammal paani mein rehta hai aur sonar jaisa echolocation use karta hai?","dolphin",["dolphins"],"Smile wali marine celebrity.","Dolphins use echolocation."),
-        ("Easy","Kaunsa animal honey banane wali colony ka member hai?","bee",["honeybee","honey bee"],"Buzz buzz.","Honeybees live socially and produce honey."),
-    ],
-    "Emoji": [
-        ("Easy","Decode 😂🔥 = ?","funny and awesome",["funny awesome","hilarious"],"Laugh + fire.","It suggests something hilariously good or awesome."),
-        ("Easy","Decode 😴📚 = ?","sleepy while studying",["sleepy study","studying sleepy"],"Books open, eyes closed.","The emojis suggest being sleepy while studying."),
-        ("Medium","Decode 🚗💨🏠 = ?","going home fast",["fast home","rushing home"],"Car + speed + home.","It suggests rushing home."),
-        ("Easy","Decode 🍕❤️ = ?","love pizza",["pizza love","pizza lover"],"Food crush.","It suggests loving pizza."),
-        ("Medium","Decode 🤦‍♂️📱 = ?","phone fail",["facepalm phone","phone mistake"],"Phone ne dimaag kha liya.","It suggests frustration caused by a phone."),
-        ("Easy","Decode 🐌🐢 = ?","very slow",["slow","super slow"],"Dono speed champions nahi hain.","Both symbols suggest slowness."),
-        ("Medium","Decode 🎯👑 = ?","target king",["king of the target","bullseye king"],"Aim + crown.","It suggests being the best at hitting the target."),
-        ("Easy","Decode ☕😴 = ?","coffee needed",["need coffee","coffee for sleep"],"Sleep ko coffee se fight.","It suggests needing coffee to wake up."),
-        ("Medium","Decode 🧠⚡ = ?","brain power",["smart","quick thinking"],"Brain + electricity.","It suggests fast or powerful thinking."),
-        ("Easy","Decode 🏃‍♂️💨 = ?","running fast",["fast running","run fast"],"Speed mode.","It suggests running quickly."),
-        ("Medium","Decode 🤫👂 = ?","secret listener",["listen quietly","silent listening"],"Shhh + ear.","It suggests listening quietly."),
-        ("Easy","Decode 🎮🌙 = ?","gaming at night",["night gaming","late night gaming"],"Controller + moon.","It suggests gaming at night."),
-    ],
-    "City": [
-        ("Easy","India mein 'City of Lakes' naam se commonly kaunsi city famous hai?","Udaipur",["udaipur"],"Rajasthan.","Udaipur is widely known as the City of Lakes."),
-        ("Easy","India ki financial capital commonly kaunsi city boli jaati hai?","Mumbai",["bombay"],"Bollywood bhi yahin.","Mumbai is commonly described as India's financial capital."),
-        ("Easy","'Pink City' kaun si Indian city hai?","Jaipur",["jaipur"],"Rajasthan.","Jaipur is known as the Pink City."),
-        ("Medium","'City of Joy' nickname kis city se associated hai?","Kolkata",["calcutta"],"West Bengal.","Kolkata is widely called the City of Joy."),
-        ("Easy","India ka Silicon Valley nickname kis city ko milta hai?","Bengaluru",["bangalore"],"IT hub.","Bengaluru is often called India's Silicon Valley."),
-        ("Medium","'Scotland of the East' India mein kis city ko kaha jaata hai?","Shillong",["shillong"],"Meghalaya.","Shillong is commonly called the Scotland of the East."),
-        ("Easy","Gateway of India kis city mein hai?","Mumbai",["bombay"],"Sea-facing landmark.","The Gateway of India is in Mumbai."),
-        ("Medium","Charminar kis city ka iconic landmark hai?","Hyderabad",["hyderabad"],"Biryani bhi bonus clue.","Charminar is in Hyderabad."),
-        ("Easy","Vidhana Soudha kis city mein hai?","Bengaluru",["bangalore"],"Karnataka capital.","Vidhana Soudha is in Bengaluru."),
-        ("Medium","Konark Sun Temple ke nearest major city context mein Odisha ki famous city kaunsi hai?","Puri",["puri"],"Jagannath Temple bhi nearby.","Puri is a major nearby city and pilgrimage centre."),
-        ("Easy","Bara Imambara kis city mein hai?","Lucknow",["lucknow"],"UP ki nawabi vibe.","Bara Imambara is in Lucknow."),
-        ("Medium","Howrah Bridge kis city ke saath associated hai?","Kolkata",["calcutta"],"Hooghly river.","Howrah Bridge is associated with Kolkata."),
-    ],
-    "Riddle": [
-        ("Easy","Main toot jaaun to awaaz nahi, par dil dukhta hai. Main kya hoon?","promise",["a promise"],"Kisi ko diya hua commitment.","A broken promise can hurt emotionally."),
-        ("Easy","Mere paas face aur hands hain, par body nahi. Main?","clock",["a clock"],"Time bataunga.","A clock has a face and hands."),
-        ("Medium","Jitna mujhe bharo, utna halka hota jaata hoon. Main?","balloon",["a balloon"],"Hawa ka game.","A balloon rises or feels lighter as filled with gas."),
-        ("Easy","Main khud nahi chalti, par log mujhe follow karte hain. Main?","map",["a map"],"Raasta dikhata hoon.","A map guides people without moving itself."),
-        ("Medium","Mere paas branches hain, leaves nahi. Main?","bank",["a bank"],"Money wali branches.","A bank has branches."),
-        ("Easy","Main khata nahi, par 'mouth' rakhta hoon. Main?","river",["a river"],"River mouth clue.","A river has a mouth where it enters a larger body of water."),
-        ("Medium","Mujhe jitna share karo, utna kam nahi hota. Main?","knowledge",["knowledge"],"Knowledge ka ulta nahi hota.","Sharing knowledge does not consume it."),
-        ("Easy","Main room ko bhar sakta hoon bina jagah liye. Main?","light",["light"],"Switch on.","Light illuminates a room."),
-        ("Medium","Main bina pair ke run karta hoon aur bina muh ke roar karta hoon. Main?","waterfall",["water"],"Nature ka loud mode.","A waterfall flows and can make a roaring sound."),
-        ("Easy","Main lock nahi kholta, par key mere andar hoti hai. Main?","keyboard",["a keyboard"],"Computer wali keys.","A keyboard contains keys."),
-        ("Medium","Mera kal aaj se hamesha aage hota hai, par aate hi aaj ban jaata hai. Main?","tomorrow",["tomorrow"],"Calendar trick.","Tomorrow becomes today when it arrives."),
-        ("Easy","Main jitna kaato, utna bada hota hoon. Main?","hole",["a hole"],"Ground ka villain.","Removing material can make a hole larger."),
-    ],
-    "Trick": [
-        ("Easy","Agar 10 fish tank mein hain aur 2 'drown' ho gayi, kitni fish hain?","10",["ten","10 fish"],"Fish already water mein hain.","The fish are still in the tank."),
-        ("Easy","Ek aadmi Friday ko city gaya aur 3 din baad Friday ko wapas aa gaya. Kaise?","horse was named Friday",["his horse was named friday","friday was the horse"],"Friday person nahi tha.","Friday was the name of his horse."),
-        ("Easy","Aap race mein last person ko overtake karte ho. Aap kaunse place par ho?","impossible",["can't overtake last","not possible"],"Last ko overtake karna logical trap hai.","You cannot overtake the person who is already last."),
-        ("Medium","Agar clock 12 bajne par 12 strikes karti hai, 6 strikes ke beech kitne intervals?","5",["five"],"Strikes nahi, gaps count karo.","Six strikes create five intervals."),
-        ("Easy","Ek room mein 3 bulbs aur bahar 3 switches hain. Door ek baar khol sakte ho. Classic puzzle kis cheez se solve hota hai?","heat",["temperature","bulb heat"],"Light ke saath heat bhi clue hai.","A bulb can be identified by whether it is warm."),
-        ("Easy","Aapke paas 5 apples hain aur 2 le liye. Aapke paas?","2",["two"],"Question wording pe dhyan.","You took two apples."),
-        ("Medium","0 ko kisi nonzero number se multiply karo. Result?","0",["zero"],"Zero ka ego strong hai.","Zero times any finite number is zero."),
-        ("Easy","Ek kilo cotton aur ek kilo iron: kaun heavy?","same",["equal","neither"],"Dono 1 kg.","Equal masses weigh the same in the same gravitational field."),
-        ("Medium","Agar Monday ke 7 din baad kya?","Monday",["monday"],"Week ne loop maara.","Seven days returns to the same weekday."),
-        ("Easy","Kaunsa word 'wrong' dictionary mein wrong likha hota hai?","wrong",["wrong"],"Sentence ko literal padho.","The word 'wrong' itself is spelled that way."),
-        ("Medium","Aap candle ko blow karte ho, par flame nahi bujhti kyunki candle hai hi nahi. Kya bujha?","nothing",["nothing"],"Imaginary candle.","Nothing is extinguished if there is no candle."),
-        ("Easy","2 + 2 × 0 = ?","2",["two"],"BODMAS yaad.","Multiplication happens before addition."),
-    ],
-    "Logic": [
-        ("Easy","Hinglish Logic: 5 dost, har ek ke paas 2 samose. Total?","10",["ten"],"Simple squad math.","5×2 = 10."),
-        ("Easy","3 rooms, har room mein 4 chairs. Total chairs?","12",["twelve"],"Room multiply karo.","3×4 = 12."),
-        ("Medium","Ek number ko 3 se multiply karke 6 add karo = 21. Number?","5",["five"],"21−6, then ÷3.","The number is 5."),
-        ("Easy","Agar 20 ka half 10 hai, 20 ka quarter?","5",["five"],"Half ka bhi half.","A quarter of 20 is 5."),
-        ("Medium","4 cats, har cat 4 paws. Total paws?","16",["sixteen"],"Cat math.","4×4 = 16."),
-        ("Hard","2, 6, 12, 20, ? — next?","30",["30"],"n(n+1) pattern.","The next term is 30."),
-        ("Easy","Ek dozen + aadha dozen = ?","18",["eighteen"],"12 + 6.","A dozen is 12 and half is 6."),
-        ("Medium","Agar 1 pen ₹7 ka hai, 6 pens?","42",["42 rupees","₹42"],"7×6.","Six pens cost ₹42."),
-        ("Easy","100 ko 4 equal parts mein baanto. Har part?","25",["25"],"Quarter.","100/4 = 25."),
-        ("Medium","Ek bus mein 18 log. 7 utar gaye, 5 chadh gaye. Ab?","16",["sixteen"],"18−7+5.","There are 16 people."),
-        ("Hard","1, 4, 10, 22, ?","46",["46"],"×2 +2 repeating.","22×2+2 = 46."),
-        ("Easy","Agar 8 chocolates 4 logon mein equally baanto? Har ek ko?","2",["two"],"Equal share.","Each gets 2."),
-    ],
-    "Pattern": [
-        ("Easy","Next: 4, 8, 12, 16, ?","20",["20"],"+4.","Add 4."),
-        ("Easy","Next: 10, 20, 30, 40, ?","50",["50"],"+10.","Add 10."),
-        ("Medium","Next: 1, 3, 6, 10, ?","15",["15"],"+2,+3,+4...","Add increasing integers."),
-        ("Medium","Next: 2, 5, 10, 17, ?","26",["26"],"+3,+5,+7...","Add consecutive odd numbers."),
-        ("Hard","Next: 3, 7, 15, 31, ?","63",["63"],"×2+1.","Double and add one."),
-        ("Easy","Next: 81, 72, 63, 54, ?","45",["45"],"-9.","Subtract 9."),
-        ("Medium","Next: 1, 2, 4, 7, 11, ?","16",["16"],"+1,+2,+3,+4...","Increasing differences."),
-        ("Hard","Next: 2, 4, 10, 28, ?","82",["82"],"×3−2.","Multiply by 3, subtract 2."),
-        ("Easy","Next: 5, 15, 25, 35, ?","45",["45"],"+10.","Add 10."),
-        ("Medium","Next: 64, 32, 16, 8, ?","4",["4"],"÷2.","Halve each term."),
-        ("Hard","Next: 6, 12, 24, 48, ?","96",["96"],"×2.","Double."),
-        ("Easy","Next: 100, 95, 90, 85, ?","80",["80"],"-5.","Subtract 5."),
-    ],
-    "Panic": [
-        ("Easy","Panic: 7+8 = ?","15",["15"],"Fast.","15."),
-        ("Easy","Panic: 9×9 = ?","81",["81"],"Classic.","81."),
-        ("Easy","Panic: India ki capital?","New Delhi",["delhi","new delhi"],"Capital city.","New Delhi."),
-        ("Easy","Panic: 60 seconds = ? minute","1",["one"],"Time.","1 minute."),
-        ("Easy","Panic: 100−37 = ?","63",["63"],"Quick subtract.","63."),
-        ("Easy","Panic: 5² = ?","25",["25"],"Square.","25."),
-        ("Easy","Panic: Red Planet?","Mars",["mars"],"Space.","Mars."),
-        ("Easy","Panic: 1 dozen = ?","12",["twelve"],"Baker's dozen nahi.","12."),
-        ("Easy","Panic: Triangle ke sides?","3",["three"],"Basic shape.","3."),
-        ("Easy","Panic: Water formula?","H2O",["h2o"],"Two H, one O.","H2O."),
-        ("Easy","Panic: 50% of 80?","40",["40"],"Half.","40."),
-        ("Easy","Panic: Earth ka natural satellite?","Moon",["moon"],"Night sky.","Moon."),
-    ],
-    "Bluff Master": [
-        ("Easy","BLUFF: FALSE kaun? A) Sun is a star B) Moon is a planet C) Earth orbits Sun","moon is a planet",["b","B","moon planet"],"Moon ko planet mat banana.","The Moon is Earth's natural satellite."),
-        ("Easy","BLUFF: FALSE? A) Fish live in water B) Penguins are birds C) Penguins are mammals","penguins are mammals",["c","C"],"Penguins ka category yaad.","Penguins are birds."),
-        ("Medium","BLUFF: FALSE? A) 2 is prime B) 9 is prime C) 11 is prime","9 is prime",["b","B"],"9 = 3×3.","9 is composite."),
-        ("Easy","BLUFF: FALSE? A) India is in Asia B) Sahara is a desert C) Amazon is a continent","amazon is a continent",["c","C"],"Amazon usually river/forest context.","Amazon is not a continent."),
-        ("Medium","BLUFF: FALSE? A) Oxygen is O B) Gold is Au C) Iron is Ir","iron is ir",["c","C"],"Iron ka symbol Fe.","Iron is Fe."),
-        ("Easy","BLUFF: FALSE? A) A square has 4 sides B) A triangle has 3 C) A circle has 4 straight sides","a circle has 4 straight sides",["c","C"],"Circle smooth hai.","A circle has no straight sides."),
-        ("Medium","BLUFF: FALSE? A) Water freezes at 0°C B) Water boils near 100°C at standard pressure C) Ice is denser than water","ice is denser than water",["c","C"],"Ice floats.","Ice is less dense than liquid water."),
-        ("Easy","BLUFF: FALSE? A) Cats are mammals B) Whales are mammals C) Sharks are mammals","sharks are mammals",["c","C"],"Shark = fish.","Sharks are fish."),
-        ("Medium","BLUFF: FALSE? A) Jupiter is a planet B) Venus is a planet C) Pluto is classified as a dwarf planet","pluto is a planet",["pluto is a planet","not a planet"],"Current classification matters.","Pluto is classified as a dwarf planet."),
-        ("Easy","BLUFF: FALSE? A) 5×5=25 B) 6×6=36 C) 7×7=47","7×7=47",["c","C","47"],"7×7 yaad karo.","7×7 = 49."),
-        ("Medium","BLUFF: FALSE? A) Delhi is in India B) Tokyo is in Japan C) Sydney is in New Zealand","sydney is in new zealand",["c","C"],"Australia clue.","Sydney is in Australia."),
-        ("Easy","BLUFF: FALSE? A) A bat is a mammal B) A whale is a mammal C) A bat is a bird","a bat is a bird",["c","C"],"Flight ≠ bird.","Bats are mammals."),
-    ],
-    "Risk It": [
-        ("Easy","RISK x2: 6×7 = ?","42",["42"],"Double XP, no panic.","42."),
-        ("Easy","RISK x2: 144 ka square root?","12",["12"],"12×12.","12."),
-        ("Medium","RISK x2: 15% of 200?","30",["30"],"10% + 5%.","30."),
-        ("Medium","RISK x2: Australia ki capital?","Canberra",["canberra"],"Not Sydney.","Canberra."),
-        ("Hard","RISK x2: 2^10 = ?","1024",["1024"],"Powers of two.","1024."),
-        ("Easy","RISK x2: Largest ocean?","Pacific",["pacific ocean"],"Blue giant.","Pacific Ocean."),
-        ("Medium","RISK x2: 17×5 = ?","85",["85"],"10×5 + 7×5.","85."),
-        ("Easy","RISK x2: 1/2 as percent?","50%",["50","50 percent"],"Half.","50%."),
-        ("Hard","RISK x2: Square of 19?","361",["361"],"20²−39.","361."),
-        ("Easy","RISK x2: Human body ka pump organ?","heart",["heart"],"Heartbeat.","Heart."),
-        ("Medium","RISK x2: 2³ + 4 = ?","12",["12"],"8+4.","12."),
-        ("Hard","RISK x2: Smallest prime greater than 30?","31",["31"],"Next prime.","31."),
-    ],
-    "Memory Bomb": [
-        ("Easy","MEMORY: SUN - 7 - APPLE - TRAIN. Item 2?","7",["seven"],"Second item.","7."),
-        ("Easy","MEMORY: DOG - BLUE - 42 - MOON. Item 4?","moon",["moon"],"Last item.","Moon."),
-        ("Medium","MEMORY: RIVER - TIGER - 19 - GLASS. Item 1?","river",["river"],"First.","River."),
-        ("Medium","MEMORY: LEMON - 8 - ROCKET - CLOUD. Item 3?","rocket",["rocket"],"Third.","Rocket."),
-        ("Easy","MEMORY: MANGO - 5 - TRAIN - STAR. Item 2?","5",["five"],"Second.","5."),
-        ("Medium","MEMORY: OCEAN - 31 - FOX - PIANO. Item 4?","piano",["piano"],"Last.","Piano."),
-        ("Easy","MEMORY: BLUE - 14 - APPLE - SUN. Item 1?","blue",["blue"],"First.","Blue."),
-        ("Medium","MEMORY: CROWN - 9 - MARS - KITE. Item 3?","mars",["mars"],"Third.","Mars."),
-        ("Easy","MEMORY: TEA - 22 - LION - RAIN. Item 2?","22",["twenty two"],"Second.","22."),
-        ("Medium","MEMORY: GLASS - MOON - 47 - TREE. Item 4?","tree",["tree"],"Last.","Tree."),
-        ("Easy","MEMORY: STAR - 3 - RIVER - GOLD. Item 3?","river",["river"],"Third.","River."),
-        ("Medium","MEMORY: TIGER - 18 - CLOUD - TRAIN. Item 2?","18",["eighteen"],"Second.","18."),
-    ],
-    "One Word Chaos": [
-        ("Easy","ONE WORD: Opposite of noisy?","quiet",["silent"],"One word only.","Quiet."),
-        ("Easy","ONE WORD: Frozen dessert?","icecream",["ice cream"],"One word only.","Ice cream is the intended answer."),
-        ("Medium","ONE WORD: Fear of spiders?","arachnophobia",["arachnophobia"],"Arachnid clue.","Arachnophobia."),
-        ("Easy","ONE WORD: Baby dog?","puppy",["puppy"],"Dog ka mini version.","Puppy."),
-        ("Easy","ONE WORD: Opposite of victory?","defeat",["loss"],"Game ka ulta result.","Defeat."),
-        ("Medium","ONE WORD: Person who writes books?","author",["writer"],"Book creator.","Author."),
-        ("Easy","ONE WORD: Shape with three sides?","triangle",["triangle"],"3 sides.","Triangle."),
-        ("Medium","ONE WORD: Study of weather?","meteorology",["meteorology"],"Weather scientist clue.","Meteorology."),
-        ("Easy","ONE WORD: Red + blue?","purple",["violet"],"Colour mix.","Purple."),
-        ("Easy","ONE WORD: Planet we live on?","Earth",["earth"],"Home planet.","Earth."),
-        ("Medium","ONE WORD: Instrument that measures earthquakes?","seismometer",["seismograph"],"Seismic clue.","A seismometer measures ground motion."),
-        ("Easy","ONE WORD: Opposite of empty?","full",["full"],"No space left.","Full."),
-    ],
-    "Mystery Power": [
-        ("Easy","MYSTERY: Force that pulls you down?","gravity",["gravity"],"Earth ka invisible pull.","Gravity."),
-        ("Easy","MYSTERY: Why does a mirror show your face?","reflection",["reflection of light"],"Light bounces.","Reflection."),
-        ("Medium","MYSTERY: Rainbow mein colours separate hone ka key phenomenon?","dispersion",["dispersion"],"Prism clue.","Dispersion separates wavelengths."),
-        ("Easy","MYSTERY: Sound ko travel karne ke liye kya chahiye?","medium",["a medium"],"Vacuum mein ordinary sound nahi.","Sound needs a material medium."),
-        ("Medium","MYSTERY: Heat transfer through moving fluid?","convection",["convection"],"Boiling water clue.","Convection transfers heat by fluid motion."),
-        ("Easy","MYSTERY: Magnet ka invisible region?","magnetic field",["magnetic field"],"Field hai, wall nahi.","A magnetic field surrounds a magnet."),
-        ("Medium","MYSTERY: Static electricity ka common example?","electric charge",["charge","static charge"],"Comb + hair.","Static charge builds up on surfaces."),
-        ("Easy","MYSTERY: Light vacuum mein approximately kitni fast?","300000 km/s",["3e5 km/s","300,000 km/s"],"Very, very fast.","Light travels about 300,000 km/s in vacuum."),
-        ("Medium","MYSTERY: Object ko float karane wali upward force?","buoyant force",["buoyancy"],"Water ka push.","Buoyant force acts upward on immersed objects."),
-        ("Hard","MYSTERY: Moving clock relative observer ke liye slower?","time dilation",["time dilation"],"Relativity clue.","This is time dilation."),
-        ("Easy","MYSTERY: Surface motion ko oppose karne wali force?","friction",["friction"],"Grip ka hero.","Friction opposes relative motion."),
-        ("Medium","MYSTERY: Lens light ko bend karne ka effect?","refraction",["refraction"],"Water-glass clue.","Refraction is bending of light at a boundary."),
-    ],
-    "Sabotage Round": [
-        ("Easy","SABOTAGE: 1 kg cotton vs 1 kg iron — heavier?","same",["equal","neither"],"Trap obvious hai.","Both have the same mass."),
-        ("Easy","SABOTAGE: 0 positive hai ya negative?","neither",["neither"],"Number line pe middle.","Zero is neither positive nor negative."),
-        ("Easy","SABOTAGE: 0.50 aur 0.5?","same",["equal"],"Trailing zero ka drama.","They represent the same number."),
-        ("Medium","SABOTAGE: 2 weeks after Monday?","Monday",["monday"],"14 days.","It is Monday."),
-        ("Easy","SABOTAGE: Square rectangle hai?","yes",["yes"],"Definitions yaad.","A square is a special rectangle."),
-        ("Medium","SABOTAGE: 10÷2×2 = ?","10",["10"],"Left-to-right same precedence.","10."),
-        ("Easy","SABOTAGE: 1000 grams = ?","1 kilogram",["1 kg","kilogram"],"Metric conversion.","1000 g = 1 kg."),
-        ("Medium","SABOTAGE: 1 hour mein seconds?","3600",["3600 seconds"],"60×60.","3600."),
-        ("Easy","SABOTAGE: Triangle ke angles ka sum?","180",["180 degrees","180°"],"Geometry trap nahi.","The sum is 180° in Euclidean geometry."),
-        ("Medium","SABOTAGE: 0×999999?","0",["zero"],"Zero strikes again.","0."),
-        ("Easy","SABOTAGE: 1 dozen + 1 dozen?","24",["24"],"12+12.","24."),
-        ("Medium","SABOTAGE: 3/4 as percent?","75%",["75","75 percent"],"Quarter less than full.","75%."),
-    ],
-    "Buzzer Battle": [
-        ("Easy","BUZZ! 5×9?","45",["45"],"Fast.","45."),
-        ("Easy","BUZZ! India ki capital?","New Delhi",["delhi","new delhi"],"Capital.","New Delhi."),
-        ("Easy","BUZZ! 100−1?","99",["99"],"Don't overthink.","99."),
-        ("Easy","BUZZ! Largest planet?","Jupiter",["jupiter"],"Gas giant.","Jupiter."),
-        ("Easy","BUZZ! H2O?","water",["water"],"Basic.","Water."),
-        ("Medium","BUZZ! 13×4?","52",["52"],"Quick math.","52."),
-        ("Easy","BUZZ! Red Planet?","Mars",["mars"],"Space.","Mars."),
-        ("Easy","BUZZ! 7 days = ? week","1",["one"],"Calendar.","1 week."),
-        ("Medium","BUZZ! 15²?","225",["225"],"15×15.","225."),
-        ("Easy","BUZZ! Earth ka satellite?","Moon",["moon"],"Night sky.","Moon."),
-        ("Medium","BUZZ! SI unit of force?","newton",["newton","N"],"Newton.","Newton."),
-        ("Easy","BUZZ! 50% of 60?","30",["30"],"Half.","30."),
-    ],
-    "CHAOS MODE": [
-        ("Easy","CHAOS: 1+1?","2",["two"],"Don't let chaos fool you.","2."),
-        ("Easy","CHAOS: Which is bigger: 0.8 or 0.08?","0.8",["0.80"],"Decimal trap.","0.8 is larger."),
-        ("Medium","CHAOS: 3²+4² = ?","25",["25"],"Squares.","9+16=25."),
-        ("Easy","CHAOS: A square has how many corners?","4",["four"],"Shape check.","4."),
-        ("Medium","CHAOS: 10% of 500?","50",["50"],"One tenth.","50."),
-        ("Easy","CHAOS: Opposite of up?","down",["down"],"Gravity agrees.","Down."),
-        ("Medium","CHAOS: 2, 4, 8, 16, next?","32",["32"],"Double.","32."),
-        ("Easy","CHAOS: Which is not a fruit: apple, mango, carrot?","carrot",["carrot"],"Botanical debate aside, common food category.","Carrot is commonly treated as a vegetable."),
-        ("Medium","CHAOS: 1/4 + 1/4?","1/2",["0.5","0.50","50%"],"Two quarters.","One half."),
-        ("Easy","CHAOS: 60 minutes = ? hour","1",["one"],"Clock.","1."),
-        ("Medium","CHAOS: 5³?","125",["125"],"5×5×5.","125."),
-        ("Easy","CHAOS: Fastest land animal?","cheetah",["cheetah"],"Speed king.","Cheetah."),
-    ],
-    "King of the Hill": [
-        ("Easy","KOTH: 12×12?","144",["144"],"Hill starter.","144."),
-        ("Medium","KOTH: 17²?","289",["289"],"17×17.","289."),
-        ("Easy","KOTH: Largest ocean?","Pacific",["pacific ocean"],"Blue giant.","Pacific Ocean."),
-        ("Medium","KOTH: Chemical symbol for sodium?","Na",["na"],"Natrium.","Na."),
-        ("Easy","KOTH: 2^8?","256",["256"],"Power of two.","256."),
-        ("Medium","KOTH: 1 km = ? metres","1000",["1000","1000 m"],"Metric.","1000 metres."),
-        ("Easy","KOTH: pH neutral water roughly?","7",["7"],"Neutral.","About 7 at 25°C."),
-        ("Hard","KOTH: 19×19?","361",["361"],"20²−39.","361."),
-        ("Medium","KOTH: Force of attraction between masses?","gravity",["gravitational force"],"Planet clue.","Gravity."),
-        ("Easy","KOTH: SI unit of power?","watt",["watt"],"Named after James Watt.","Watt."),
-        ("Medium","KOTH: 3/5 as percent?","60%",["60","60 percent"],"Three out of five.","60%."),
-        ("Hard","KOTH: Approx speed of sound in air?","343 m/s",["343","343 mps"],"Room-temperature approximation.","About 343 m/s."),
-    ],
-}
-
-for _mode, _rows in HINGLISH_PACKS.items():
-    add_pack(_mode, _rows)
-
-# Make the three math-heavy banks large through real parameterized questions,
-# not cosmetic BONUS copies.
-for _i in range(40):
-    _a = 6 + (_i * 7) % 45
-    _b = 2 + (_i * 5) % 18
-    _c = 1 + (_i * 3) % 9
-    _answer = _a + _b - _c
-    QUESTIONS["Logic"].append(Q(
-        f"Quick Logic: {_a} + {_b} − {_c} = ?",
-        str(_answer), "Easy" if _i < 25 else "Medium", [str(_answer)],
-        "Teen-speed math. No calculator drama.", f"{_a}+{_b}−{_c} = {_answer}."
-    ))
-
-for _i in range(40):
-    _start = 3 + (_i % 17)
-    _step = 2 + ((_i * 3) % 11)
-    _vals = [_start + j * _step for j in range(4)]
-    _ans = _vals[-1] + _step
-    QUESTIONS["Pattern"].append(Q(
-        f"Pattern Rush: {_vals[0]}, {_vals[1]}, {_vals[2]}, {_vals[3]}, ?",
-        str(_ans), "Easy" if _i < 25 else "Medium", [str(_ans)],
-        f"Har baar +{_step}.", f"Add {_step} each time."
-    ))
-
-# Valid Target Number constructions generated from their actual numbers.
-for _i in range(45):
-    _a = 2 + (_i % 9)
-    _b = 3 + ((_i * 2) % 8)
-    _c = 1 + ((_i * 3) % 7)
-    _d = 2 + ((_i * 5) % 6)
-    _target = _a * _b + _c - _d
-    _expr = f"{_a}*{_b}+{_c}-{_d}"
-    _diff = ["Easy", "Medium", "Hard", "Extreme"][_i % 4]
-    _q = Q(
-        f"Target {_target}: Use {_a}, {_b}, {_c}, {_d} exactly once. Make {_target}.",
-        _expr, _diff, [str(_target)],
-        "Numbers ko ek-ek baar use karo. * / + - allowed.",
-        f"One valid build: {_expr} = {_target}."
-    )
-    _q["target"] = _target
-    _q["numbers"] = [_a, _b, _c, _d]
-    QUESTIONS["Target Number"].append(_q)
-
-# For any remaining smaller bank, add no fake duplicates: the selector can
-# recycle only after exhausting every distinct question in the current run.
 # Repair the known broken Target Number entries from the old bank.
 TARGET_FIXES = {
     0: ("(6*(4+1))-6", ["24"], "Extreme", "6×(4+1)−6 = 24."),
@@ -998,7 +700,118 @@ No “start again” after every question.
 ⏰ Timeout reveals the answer.
 ♾️ <b>ENDLESS:</b> keep playing until you press END GAME.
 """
+# ============================================================
+# GUESSARENA UI / GAME HELPERS
+# ============================================================
 
+def mode_menu():
+    modes = list(QUESTIONS.keys())
+
+    rows = []
+    row = []
+
+    for mode in modes:
+        button = InlineKeyboardButton(
+            f"{MODE_EMOJI.get(mode, '🎮')} {mode}",
+            callback_data=f"mode:{mode}"
+        )
+        row.append(button)
+
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+
+    if row:
+        rows.append(row)
+
+    rows.append([
+        InlineKeyboardButton("📅 DAILY", callback_data="menu:daily"),
+        InlineKeyboardButton("👤 PROFILE", callback_data="menu:profile"),
+    ])
+
+    rows.append([
+        InlineKeyboardButton("🏆 LEADERBOARD", callback_data="menu:leaderboard"),
+        InlineKeyboardButton("🏅 ACHIEVEMENTS", callback_data="menu:achievements"),
+    ])
+
+    rows.append([
+        InlineKeyboardButton("❓ HOW TO PLAY", callback_data="menu:help")
+    ])
+
+    return InlineKeyboardMarkup(rows)
+
+
+def difficulty_menu(mode):
+    rows = []
+
+    for difficulty in DIFFICULTIES:
+        rows.append([
+            InlineKeyboardButton(
+                f"{difficulty} • +{XP_VALUES[difficulty]} XP",
+                callback_data=f"diff:{mode}:{difficulty}"
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton(
+            "🎲 ANY DIFFICULTY",
+            callback_data=f"diff:{mode}:Any"
+        )
+    ])
+
+    rows.append([
+        InlineKeyboardButton("⬅️ BACK", callback_data="menu:play")
+    ])
+
+    return InlineKeyboardMarkup(rows)
+
+
+def main_menu():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎮 PLAY", callback_data="menu:play"),
+            InlineKeyboardButton("📅 DAILY", callback_data="menu:daily"),
+        ],
+        [
+            InlineKeyboardButton("👤 PROFILE", callback_data="menu:profile"),
+            InlineKeyboardButton("🏆 LEADERBOARD", callback_data="menu:leaderboard"),
+        ],
+        [
+            InlineKeyboardButton("🏅 ACHIEVEMENTS", callback_data="menu:achievements"),
+            InlineKeyboardButton("❓ HELP", callback_data="menu:help"),
+        ],
+    ])
+
+
+def round_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💡 HINT", callback_data="round:hint"),
+            InlineKeyboardButton("🛑 END GAME", callback_data="round:end"),
+        ]
+    ])
+
+
+def timer_for(q):
+    difficulty = q.get("difficulty", "Medium")
+
+    if difficulty == "Easy":
+        return 15
+    elif difficulty == "Medium":
+        return 15
+    elif difficulty == "Hard":
+        return 20
+    elif difficulty == "Extreme":
+        return 20
+    elif difficulty == "Panic":
+        return 8
+
+    return 15
+
+
+def xp_for(q):
+    difficulty = q.get("difficulty", "Medium")
+    return XP_VALUES.get(difficulty, 20)
 
 def cancel_countdown(chat_id):
     task = countdown_tasks.pop(chat_id, None)
@@ -1038,10 +851,8 @@ def choose_question(mode, difficulty, used):
     pool = pool_for(mode, difficulty)
     available = [q for q in pool if question_key(q) not in used]
     if not available:
-        # A complete cycle has finished. Start a fresh shuffled cycle.
         used.clear()
         available = pool[:]
-        random.shuffle(available)
     if not available:
         return None
     q = random.choice(available)
@@ -1144,38 +955,6 @@ def is_correct(q, text):
     return any(normalize(text) == normalize(str(x)) for x in expected)
 
 
-
-def achievement_for_win(q, streak, elapsed_seconds=None):
-    out = []
-    if streak == 1:
-        out.append("first_win")
-    if elapsed_seconds is not None and elapsed_seconds <= 3:
-        out.append("speed_demon")
-    if q.get("mode") == "CHAOS MODE":
-        out.append("chaos")
-    return out
-
-
-def round_xp(state, q):
-    if state.get("xp_override") is not None:
-        return int(state["xp_override"])
-    base = xp_for(q)
-    mode = q.get("mode")
-    if mode == "Risk It":
-        return base * 2
-    if mode == "Buzzer Battle":
-        return base + 10
-    if mode == "CHAOS MODE":
-        return base + 5
-    if mode == "King of the Hill":
-        return base + 5
-    return base
-
-
-def daily_pool():
-    return QUESTIONS["CHAOS MODE"] + QUESTIONS["Logic"] + QUESTIONS["Trick"] + QUESTIONS["Riddle"]
-
-
 async def countdown(bot, chat_id, round_id, seconds):
     task = asyncio.current_task()
     try:
@@ -1207,12 +986,6 @@ async def countdown(bot, chat_id, round_id, seconds):
         starter = state.get("starter")
         if starter:
             add_result(chat_id, starter["id"], starter["name"], reset_streak=True)
-        if state.get("mode") == "DAILY" and starter:
-            set_achievement(chat_id, starter["id"], "daily")
-        # Daily is a one-shot challenge; normal modes continue endlessly.
-        if state.get("mode") == "DAILY":
-            active.pop(chat_id, None)
-            return
         await asyncio.sleep(0.8)
         if active.get(chat_id) is state:
             await send_next_round(bot, chat_id, state)
@@ -1236,26 +1009,14 @@ async def send_next_round(bot, chat_id, state):
     state["phase"] = "question"
     state["closed"] = False
     state["round_no"] = state.get("round_no", 0) + 1
-    state["question_started_at"] = asyncio.get_running_loop().time()
     starter = state.get("starter")
     streak = get_player(chat_id, starter["id"])["streak"] if starter else 0
     seconds = timer_for(q)
-    xp = round_xp(state, q)
-    mode_rule = {
-        "Risk It": "🎲 <b>RISK:</b> correct = 2× XP. Galat hua toh streak gaya.",
-        "Buzzer Battle": "🔔 <b>BUZZ:</b> fastest correct answer wins + bonus XP.",
-        "Memory Bomb": "💣 <b>MEMORY:</b> sequence ko aankhon se lock karo, phir answer maaro.",
-        "One Word Chaos": "☝️ <b>RULE:</b> one-word answer. Essay bheja toh brain ko timeout.",
-        "Target Number": "🎯 <b>RULE:</b> displayed numbers exactly once; + − × ÷ allowed.",
-        "CHAOS MODE": "🌪️ <b>CHAOS:</b> normal question, abnormal confidence.",
-        "King of the Hill": "👑 <b>HILL:</b> har win se XP +5 bonus. Hold the crown.",
-        "Sabotage Round": "😈 <b>SABOTAGE:</b> wording tumhare against hai. Read carefully.",
-    }.get(q.get("mode"), "")
+    xp = xp_for(q)
     text = (
         f"{mode_intro(state['mode'], q.get('difficulty', state['difficulty']))}\n\n"
         f"<b>ROUND {state['round_no']}</b> • +{xp} XP • ⏱️ {seconds}s\n"
-        + (f"{mode_rule}\n" if mode_rule else "")
-        + f"🔥 Streak: <b>{streak}</b>\n\n"
+        f"🔥 Streak: <b>{streak}</b>\n\n"
         f"❓ <b>{html.escape(q['q'])}</b>\n\n"
         f"👥 <i>First correct wins. Wrong answers do NOT end the round.</i>"
     )
@@ -1282,7 +1043,6 @@ async def begin_game(message, context, mode, difficulty, user=None):
         "round_no": 0,
         "phase": "loading",
         "closed": False,
-        "xp_override": None,
     }
     await message.reply_text(
         f"🚀 <b>GAME LOADED</b>\n\n{mode_intro(mode, difficulty)}\n\n"
@@ -1346,7 +1106,7 @@ async def answer(update, context):
     state["phase"] = "result"
     cancel_countdown(chat_id)
     name = user.first_name or "Player"
-    xp = round_xp(state, q)
+    xp = xp_for(q)
     before = get_player(chat_id, user.id)
     old_level = level_from_xp(before["xp"])
     add_result(chat_id, user.id, name, xp=xp, win=True)
@@ -1369,28 +1129,10 @@ async def answer(update, context):
         set_achievement(chat_id, user.id, "level_up")
     if streak >= 5 and set_achievement(chat_id, user.id, "hot_streak"):
         lines.append("🏅 Achievement unlocked: <b>HOT STREAK</b>")
-    # First-win / speed / chaos / daily achievements.
-    elapsed = None
-    if state.get("question_started_at") is not None:
-        elapsed = max(0.0, asyncio.get_running_loop().time() - state["question_started_at"])
-    for ach in achievement_for_win(q, streak, elapsed):
-        if set_achievement(chat_id, user.id, ach):
-            labels = {
-                "first_win": "FIRST BLOOD",
-                "speed_demon": "SPEED DEMON",
-                "chaos": "CHAOS SURVIVOR",
-            }
-            lines.append(f"🏅 Achievement unlocked: <b>{labels.get(ach, ach.upper())}</b>")
-    if state.get("mode") == "DAILY":
-        if set_achievement(chat_id, user.id, "daily"):
-            lines.append("🏅 Achievement unlocked: <b>DAILY GRINDER</b>")
     if q.get("explain"):
         lines.append(f"💡 {html.escape(q['explain'])}")
     lines.append("⚡ <b>Next round incoming…</b>")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-    if state.get("mode") == "DAILY":
-        active.pop(chat_id, None)
-        return
     await asyncio.sleep(0.7)
     if active.get(chat_id) is state:
         await send_next_round(context.bot, chat_id, state)
@@ -1470,7 +1212,7 @@ async def daily(update, context):
         await update.effective_message.reply_text("🎮 Finish the current game first.")
         return
     import hashlib
-    pool = daily_pool()
+    pool = QUESTIONS["CHAOS MODE"] + QUESTIONS["Logic"] + QUESTIONS["Trick"]
     seed = int(hashlib.sha256(f"{chat_id}:{date.today().isoformat()}".encode()).hexdigest()[:12], 16)
     q = prepare_question(pool[seed % len(pool)], "DAILY")
     active[chat_id] = {
@@ -1479,7 +1221,6 @@ async def daily(update, context):
         "starter": {"id": user.id, "name": user.first_name or "Player"},
         "round_no": 0, "phase": "question", "closed": False,
         "question": q, "round_id": uuid.uuid4().hex,
-        "xp_override": 50, "question_started_at": asyncio.get_running_loop().time(),
     }
     seconds = timer_for(q)
     await update.effective_message.reply_text(
@@ -1563,13 +1304,7 @@ async def button(update, context):
 
 
 async def error_handler(update, context):
-    import traceback
-    print("[GuessArena] UNHANDLED ERROR:", flush=True)
-    traceback.print_exception(
-        type(context.error),
-        context.error,
-        context.error.__traceback__,
-    )
+    print("Unhandled error:", repr(context.error))
 
 
 async def telegram_startup(app_bot):
