@@ -26,7 +26,6 @@ def health_check():
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
-    print(f"[GuessArena] Health server starting on 0.0.0.0:{port}", flush=True)
     app.run(
         host="0.0.0.0",
         port=port,
@@ -605,22 +604,159 @@ Q("KOTH: What is the speed of sound in air approximately at room temperature?", 
 ],
 }
 
-# Small quickfire additions
+# ============================================================
+# FUN / HUMAN MODE PACK
+# These are intentionally less textbook-ish: relatable, weird,
+# playful and Hinglish-friendly while keeping answers objectively checkable.
+# ============================================================
+FUN_PACK = {
+"Word": [
+Q("Mood: 'I will do it tomorrow' ko ek word mein kya bol sakte ho?", "procrastination", "Easy", ["procrastinating", "taal matol", "delay karna"], "Kaam ko baar-baar baad ke liye dhakelna.", "Procrastination means delaying something that should be done."),
+Q("Aisa word jo kisi ko unnecessarily impress karne ke liye complicated language use karne ko describe kare?", "grandiloquent", "Hard", ["overly fancy", "fancy language"], "Simple baat ko rocket bana dena.", "Grandiloquent describes language that is pompous or overly elaborate."),
+Q("Chat mein 'brb' ka basic meaning kya hai?", "be right back", "Easy", ["be right back", "brb"], "Thodi der gayab.", "BRB is a common abbreviation for be right back."),
+Q("'Oops, I did it again' type situation ko casually kya bolenge?", "mistake", "Easy", ["error", "blunder", "galti"], "Insaan ho, calculator nahi.", "A mistake is an error or incorrect action."),
+Q("Jo person har chhoti baat mein loophole dhoondh le, usse kya keh sakte hain?", "nitpicker", "Medium", ["nit picker"], "Har comma pe case ladne wala.", "A nitpicker focuses on tiny or trivial details."),
+],
+"Animal": [
+Q("Agar ek animal tumhari taraf dekh kar bilkul statue ban jaye, sabse likely game kya hai?", "freeze", "Easy", ["freezing", "freeze response"], "Movement band. Full statue mode.", "Freezing is a common defensive behavior in animals."),
+Q("Kaunsa animal apni famous 'laugh' jaisi vocalization ke liye jaana jaata hai?", "hyena", "Easy", ["hyaena"], "Jungle ka suspicious laugh.", "Hyenas are well known for distinctive laughing-like calls."),
+Q("Kaunsa animal apne bachchon ko pouch mein carry karta hai?", "kangaroo", "Easy", ["marsupial"], "Baby ride included.", "Kangaroos are marsupials and carry young in a pouch."),
+Q("Kaunsa bird mostly backward nahi, balki seedha aage fly karta hai—but ek famous bird backwards bhi kar sakta hai?", "hummingbird", "Medium", ["humming bird"], "Tiny wings, crazy control.", "Hummingbirds are notable for their ability to fly backwards."),
+Q("Kaunsa animal 'living fossil' nickname ke saath commonly associated hai?", "horseshoe crab", "Hard", ["horseshoe crab"], "Crab naam hai, par actual crab nahi.", "Horseshoe crabs are ancient chelicerates often described as living fossils."),
+],
+"Emoji": [
+Q("Decode 😂 + 📚 = ?", "funny book", "Easy", ["funny story", "comedy book"], "Hansi + padhai.", "The intended phrase combines humor and a book."),
+Q("Decode 😴 + ⏰ = ?", "overslept", "Easy", ["oversleep", "late because of sleep"], "Alarm ne apna best diya hoga.", "Sleep plus an alarm suggests oversleeping."),
+Q("Decode 📱 + 🔋 = ?", "low battery", "Easy", ["battery low", "phone battery low"], "Phone ka classic emergency.", "The battery symbol indicates low charge."),
+Q("Decode 🍕 + 👑 = ?", "pizza king", "Easy", ["king of pizza"], "Crown kiski? Pizza ki.", "Pizza plus a crown gives the playful phrase pizza king."),
+Q("Decode 🧠 + 💤 = ?", "brain tired", "Easy", ["tired brain", "mental fatigue"], "Dimaag bhi kabhi logout karta hai.", "The combination represents a tired brain."),
+],
+"City": [
+Q("Aisi city jahan metro mein rush dekhkar tum bol do 'bhai personal space kidhar hai?'—ye question kis cheez ko describe karta hai?", "crowded city", "Easy", ["busy city", "dense city"], "Log bahut, space kam.", "A crowded city has many people in a limited urban space."),
+Q("Tourist photo mein landmark ke saamne 40 log same pose kar rahe hon—ye kis type ka spot hai?", "tourist attraction", "Easy", ["tourist spot", "tourist destination"], "Camera nikalo, pose automatic.", "A tourist attraction is a place that draws visitors."),
+Q("Kaunsi city planning feature walking ko cars ke bina easy banati hai?", "pedestrian zone", "Medium", ["pedestrian area", "car-free zone"], "Gaadi ko entry nahi, pair ko VIP treatment.", "Pedestrian zones prioritize walking and restrict vehicle traffic."),
+Q("Airport se city centre tak pahunchne wali dedicated rail service ko generally kya bolte hain?", "airport train", "Easy", ["airport rail", "airport express"], "Plane se utro, train pakdo.", "An airport train is rail transport connecting an airport with urban areas."),
+Q("City ka wo area jahan restaurants, shops aur nightlife ek saath packed milte hain, use kya keh sakte hain?", "downtown", "Easy", ["city centre", "city center"], "Lights on, wallet nervous.", "Downtown commonly refers to a central urban district."),
+],
+"Riddle": [
+Q("Main tumhare saath hoon, par mujhe pakad nahi sakte. Light aaye to dikhta hoon, darkness mein gayab. Main kya hoon?", "shadow", "Easy", ["a shadow"], "Tumhare peeche chipka hua free companion.", "A shadow is formed when light is blocked."),
+Q("Mere paas face hai aur do hands hain, par main clap nahi kar sakta. Main kya hoon?", "clock", "Easy", ["watch"], "Hands hain, par taali nahi.", "A clock has a face and hands used to show time."),
+Q("Jitna zyada tum mujhe share karte ho, utna kam tumhare paas rehta hai. Main kya hoon?", "secret", "Medium", ["a secret"], "Share button dangerous hai.", "A secret stops being secret as it is shared."),
+Q("Main toot sakta hoon bina kisi ne mujhe touch kiye. Main kya hoon?", "promise", "Easy", ["a promise"], "Physical object nahi hoon.", "A promise can be broken without physically touching anything."),
+Q("Mujhe bolte hi main khatam ho jaata hoon. Main kya hoon?", "silence", "Easy", ["quiet"], "Bas muh band rakho. 😂", "Speaking ends silence."),
+],
+"Logic": [
+Q("Friend bolta hai '5 minute mein aa raha hoon' aur 35 minute baad aata hai. Is logic ka naam?", "bad estimate", "Easy", ["wrong estimate", "poor estimate"], "Clock ne jhooth nahi bola tha.", "The estimate was inaccurate."),
+Q("Tum line mein second ho aur first person ko overtake karte ho. Ab tum?", "first", "Easy", ["1st", "number one"], "Position steal hui, person nahi.", "Overtaking the first-place person puts you in first place."),
+Q("Ek room mein 3 switches hain, doosre room mein 3 bulbs. Bulbs dekh nahi sakte. Ek trip mein mapping kaise karoge?", "use heat", "Hard", ["switch then check heat", "heat method"], "Bulb sirf light nahi, heat bhi deta hai.", "A bulb can be identified by whether it is on and whether it remains warm after being switched off."),
+Q("Agar rule hai 'odd one out', aur options mein teen fruits aur ek chair ho, chair kyun?", "not a fruit", "Easy", ["chair is not a fruit", "different category"], "Category check karo.", "The chair belongs to a different category."),
+Q("Tumhare paas 2 ropes hain, dono exactly 60 min mein burn hoti hain but unevenly. 45 min kaise measure karoge?", "burn one both ends and the other one end, then second end", "Extreme", ["rope timing method"], "Uneven burn ko defeat karne ke liye ends ka use karo.", "Burning one rope from both ends takes 30 minutes; lighting the second end of the other rope then gives another 15 minutes."),
+],
+"Trick": [
+Q("Tumhare paas 10 chocolates hain. Tum 3 le lete ho. Tumhare paas kitni hain?", "3", "Easy", ["three", "3 chocolates"], "Question 'tumhare paas' pe focus.", "You took 3 chocolates, so you have 3."),
+Q("A plane mein 50 people hain. Sab utar gaye. Plane mein kitne people bache?", "0", "Easy", ["zero", "none"], "Sab utar gaye bhai.", "If everyone got off, none remain on the plane."),
+Q("Ek aadmi Friday ko city gaya, 3 din baad Friday ko wapas aaya. Kaise?", "his horse was named Friday", "Hard", ["horse was named Friday"], "Friday zaroori nahi day hi ho.", "Friday can be a name, so the phrase does not require a weekday."),
+Q("Agar tum race mein last person ko overtake kar lo, tum kaunsi position loge?", "impossible", "Medium", ["cannot happen", "not possible"], "Last ko overtake karna race logic tod deta hai.", "If someone is truly last, there is no position behind them to overtake from."),
+Q("What has a bed but never sleeps, and a mouth but never eats?", "river", "Easy", ["a river"], "Nature ka wordplay.", "A river has a riverbed and a mouth."),
+],
+"Pattern": [
+Q("Pattern: 😴 → 😵 → ☕ → 😎. Next likely vibe?", "awake", "Easy", ["alert", "energized"], "Coffee ke baad system boot.", "The sequence moves from sleepy to alert after coffee."),
+Q("Pattern: Monday 😐, Tuesday 😐, Wednesday 😐, Friday 😎. Missing day ka vibe?", "thursday", "Easy", ["Thursday"], "Friday se ek step pehle.", "Thursday is the missing day between Wednesday and Friday."),
+Q("Pattern: tap, tap, pause, tap, tap, pause... next?", "tap", "Easy", ["one tap"], "Cycle repeat ho raha hai.", "The repeating unit is two taps followed by a pause."),
+Q("Pattern: 1 meme → laugh, 2 memes → laugh, 3 memes → ?", "more laughter", "Easy", ["laugh more", "laugh"], "Internet ka predictable algorithm.", "The playful pattern continues with more laughter."),
+Q("Pattern: 🥱 + ☕ → 👀. Is emoji pattern ka obvious meaning?", "coffee wakes you up", "Easy", ["coffee wakes me up", "coffee makes you alert"], "Eyes open = system online.", "Coffee is conventionally associated with increased alertness."),
+],
+"Panic": [
+Q("PANIC: Tumhare phone ki battery 1% hai. Sabse pehla sensible move?", "charge it", "Easy", ["plug it in", "put it on charge"], "Battery ko motivational speech nahi chahiye.", "Connecting the phone to a charger is the direct way to restore power."),
+Q("PANIC: Alarm baj raha hai aur tum late ho. Pehla kaam?", "get up", "Easy", ["wake up", "stand up"], "Snooze is the villain.", "Getting up is necessary before you can leave."),
+Q("PANIC: Exam hall mein pen nahi chal raha. Best immediate move?", "check or replace the pen", "Easy", ["change pen", "use another pen"], "Pen ko emotional support mat do.", "Checking or replacing a faulty pen solves the immediate writing problem."),
+Q("PANIC: Lift ka door close ho raha hai aur tum andar jaana chahte ho. Safe choice?", "wait for the next lift", "Easy", ["take the next lift", "wait"], "Action hero banne ki zarurat nahi.", "Waiting avoids rushing into a closing lift door."),
+Q("PANIC: Group chat mein galti se wrong message bhej diya. Best first move?", "correct it quickly", "Easy", ["send correction", "clarify"], "Panic se message delete nahi hota automatically.", "A quick correction reduces confusion."),
+],
+"Bluff Master": [
+Q("Which sounds most suspicious: 'I never lie' said by a professional liar?", "i never lie", "Easy", ["I never lie"], "Absolute statements are suspicious.", "The statement is suspicious because it is an absolute claim from a liar."),
+Q("A friend says 'Trust me bro' before explaining a crazy story. What is the safest reaction?", "ask for evidence", "Easy", ["verify it", "check proof"], "Bro is not a source citation. 😂", "Extra evidence is useful when a claim sounds doubtful."),
+Q("Someone gives an answer instantly to a question they clearly did not understand. Most likely?", "guessing", "Easy", ["they guessed", "a guess"], "Speed ≠ certainty.", "An instant unsupported answer may simply be a guess."),
+Q("A statement contains '100% guaranteed' with zero evidence. Best label?", "unsupported claim", "Medium", ["unverified claim", "claim without evidence"], "Confidence aur proof alag cheezein hain.", "A guarantee without evidence is unsupported."),
+Q("A person changes their story every time you ask for details. What should you do?", "verify the story", "Easy", ["check the facts", "ask for evidence"], "Plot twist bahut aa rahe hain.", "Changing details is a reason to verify the claim."),
+],
+"Risk It": [
+Q("RISK: 50-50 hai. Tumhe answer nahi pata. Smart move?", "use a hint", "Easy", ["hint", "take the hint"], "XP bachao, ego nahi.", "Using available information improves the chance of choosing correctly."),
+Q("RISK: High reward, but tum bilkul unsure ho. Blind guess ya clue?", "clue", "Easy", ["use clue", "hint"], "Guess ko thoda fuel do.", "A clue gives additional information before committing."),
+Q("RISK: Ek answer obvious lag raha hai, but ek option uska close alternative hai. Best move?", "read the question again", "Easy", ["reread", "check the wording"], "Trap wording ko pakdo.", "Rereading can reveal the distinction between close options."),
+Q("RISK: Streak bachani hai. Speed ya accuracy?", "accuracy", "Easy", ["accuracy first", "correctness"], "Fast wrong answer = stylish zero.", "A correct answer is more valuable than an incorrect fast guess."),
+Q("RISK: Timer 2 seconds. Answer pata hai. Best move?", "answer immediately", "Easy", ["answer", "submit"], "Ab philosophy ka time nahi.", "When certain and time is nearly over, answering immediately is sensible."),
+],
+"Memory Bomb": [
+Q("MEMORY: BLUE → 17 → PIZZA → TIGER. Item 3?", "pizza", "Easy", ["PIZZA"], "Count from the left.", "Pizza is the third item."),
+Q("MEMORY: MOON → 4 → LEMON → 88. Item 1?", "moon", "Easy", ["MOON"], "First means leftmost.", "Moon is the first item."),
+Q("MEMORY: CAT → NEON → 31 → RIVER. Item 4?", "river", "Easy", ["RIVER"], "Last item.", "River is the fourth item."),
+Q("MEMORY: 7 → CLOUD → ORANGE → 2. Item 2?", "cloud", "Easy", ["CLOUD"], "Second position.", "Cloud is the second item."),
+Q("MEMORY: ROCKET → 9 → BLUE → PIANO. Item 3?", "blue", "Easy", ["BLUE"], "Third position.", "Blue is the third item."),
+],
+"One Word Chaos": [
+Q("One word: Jab koi cheez unexpectedly bahut funny ho jaye?", "hilarious", "Easy", ["funny", "comical"], "Normal funny se ek level upar.", "Hilarious means extremely funny."),
+Q("One word: Kisi plan ko last moment pe badal dena?", "improvise", "Medium", ["improvisation", "adapt"], "Script gayi tel lene.", "To improvise is to create or adapt something spontaneously."),
+Q("One word: Jab tum kisi cheez ko baar-baar check karte ho because you are unsure?", "double-check", "Easy", ["recheck", "check again"], "Ek check enough nahi laga.", "Double-check means checking something again for accuracy."),
+Q("One word: Bina reason ke kisi cheez ka wait karte rehna?", "linger", "Hard", ["lingering"], "Jaana tha, par ruk gaye.", "To linger is to stay longer than necessary."),
+Q("One word: Kisi simple cheez ko unnecessarily complicated banana?", "overcomplicate", "Medium", ["complicate"], "Simple tha bhai. 😂", "To overcomplicate is to make something more complicated than necessary."),
+],
+"Mystery Power": [
+Q("Mystery: Invisible force jo objects ko Earth ki taraf pull karti hai?", "gravity", "Easy", ["gravitational force"], "Neeche girne ka asli boss.", "Gravity attracts masses toward each other."),
+Q("Mystery: Tumhe koi clue nahi, but pattern dekhkar educated guess karte ho. Is skill ko kya bolenge?", "inference", "Medium", ["reasoning", "deduction"], "Clues se conclusion.", "An inference is a conclusion drawn from available evidence."),
+Q("Mystery: A locked box has a riddle, a key and a timer. First useful resource?", "riddle", "Easy", ["the riddle"], "Clue ko ignore karke key mat kha jana.", "The riddle is the direct source of information for solving the puzzle."),
+Q("Mystery: Kisi unknown cheez ko identify karne ke liye sabse useful cheez?", "clue", "Easy", ["evidence", "hint"], "Mystery bina clue ke bas confusion hai.", "A clue provides information that helps identify or solve something unknown."),
+Q("Mystery: 'What if?' se possibilities explore karna kis thinking style ka part hai?", "hypothetical thinking", "Medium", ["hypothetical reasoning", "what-if thinking"], "Reality ko temporarily pause karo.", "Hypothetical thinking explores possible situations rather than only current facts."),
+],
+"Sabotage Round": [
+Q("SABOTAGE: Question easy hai, but wording says 'NOT'. Sabse pehle kya check karoge?", "the word not", "Easy", ["NOT", "negation"], "Ek word poora answer ulta kar sakta hai.", "The negation changes which options satisfy the question."),
+Q("SABOTAGE: Option mein answer sahi lag raha hai but category wrong hai. Choose?", "no", "Easy", ["reject it", "not that option"], "Sahi fact, wrong question = no entry.", "An option must satisfy the category requested by the question."),
+Q("SABOTAGE: Timer chal raha hai aur tum question ka half hi padhte ho. Best fix?", "read the full question", "Easy", ["finish reading", "read everything"], "Half question = full disaster.", "The full wording is needed to avoid missing restrictions."),
+Q("SABOTAGE: Two answers look similar. Best move?", "compare the exact wording", "Easy", ["check wording", "read carefully"], "Tiny difference hi trap ho sakta hai.", "Comparing the exact wording helps distinguish similar options."),
+Q("SABOTAGE: Hint mil gaya but it seems too obvious. Should you still verify?", "yes", "Easy", ["yes, verify"], "Hint GPS hai, autopilot nahi.", "Verification reduces mistakes even when a hint seems clear."),
+],
+"Buzzer Battle": [
+Q("BUZZER: 'Ready, set, go!' ke baad sabse important cheez?", "go", "Easy", ["start", "answer"], "Buzzer dabana hai, speech nahi.", "The action begins at go."),
+Q("BUZZER: Fastest answer wrong ho aur second answer correct ho. Winner kaun?", "second player", "Easy", ["the correct player", "second player"], "Speed alone nahi, correct speed.", "The correct player wins when the fastest response is wrong."),
+Q("BUZZER: Question complete hone se pehle guess karna kya risk create karta hai?", "wrong answer", "Easy", ["mistake", "false start"], "Jaldi ka chakkar.", "Answering before understanding the question increases the risk of being wrong."),
+Q("BUZZER: Same time pe do players correct bol dein. Fair tiebreaker?", "another round", "Easy", ["tiebreaker", "tie-break"], "Courtroom nahi, rematch. 😂", "A tiebreaker round gives both players another equal chance."),
+Q("BUZZER: Fast mode mein best combo?", "speed and accuracy", "Easy", ["fast and correct", "speed plus accuracy"], "Sirf fast = keyboard smash.", "The strongest combination is quick and correct responding."),
+],
+"CHAOS MODE": [
+Q("CHAOS: Pizza pe pineapple—universal truth ya personal preference?", "personal preference", "Easy", ["preference", "opinion"], "Ispe civil war mat start karo. 😂", "Whether pineapple belongs on pizza is a matter of personal preference."),
+Q("CHAOS: 'Seen' karke reply 6 ghante baad aaye. Iska guaranteed meaning?", "unknown", "Easy", ["cannot know", "not enough information"], "Mind reader mode unavailable.", "A delayed reply alone does not establish a single reason."),
+Q("CHAOS: Friend says '5 min'—kya ye scientifically guaranteed 5 minutes hai?", "no", "Easy", ["nope", "not guaranteed"], "Indian Standard '5 min' ka formula secret hai. 😂", "A casual estimate is not a guaranteed duration."),
+Q("CHAOS: Ek meme tumhe funny laga. Kya sabko funny lagna guaranteed hai?", "no", "Easy", ["no", "not guaranteed"], "Hum sabka humor software alag hai.", "Humor varies between people."),
+Q("CHAOS: Agar dono players same answer ko different words mein bolen aur meaning same ho, fair game mein?", "both can be correct", "Easy", ["both correct", "accept both"], "Human mode ON.", "Equivalent wording can express the same valid answer."),
+],
+"King of the Hill": [
+Q("KOTH: Hill pe rehne ke liye kya zaroori hai—sirf confidence ya correct answers?", "correct answers", "Easy", ["accuracy", "correctness"], "Confidence ka rent nahi chalta.", "Correct answers determine performance in the game."),
+Q("KOTH: Leader ko challenge karne ka cleanest tareeka?", "beat their score", "Easy", ["score higher", "get more points"], "Hill pe vacancy nahi hoti, create karni padti hai.", "A higher score is a direct way to surpass a leader."),
+Q("KOTH: Streak toot gayi. Best comeback strategy?", "start fresh", "Easy", ["keep playing", "try again"], "Tilt ko driver seat mat do.", "A fresh attempt lets you rebuild the streak."),
+Q("KOTH: Top player fast hai but repeatedly wrong. Kisko advantage?", "accurate player", "Easy", ["the accurate player", "correct player"], "Fast + wrong = decoration.", "Accuracy matters more than speed when answers are scored for correctness."),
+Q("KOTH: Hill ka real boss kaun?", "the consistent player", "Medium", ["consistent player", "most consistent player"], "Ek lucky round se kingdom nahi banta.", "Consistent performance is more reliable than one lucky round."),
+],
+}
+for _mode, _fun_items in FUN_PACK.items():
+    QUESTIONS.setdefault(_mode, []).extend(_fun_items)
+
+# Add a few generated variants so repeated sessions don't feel identical.
 EXTRA_VARIANTS = [
     ("Easy", "Quickfire: What is 5 + 8?", "13", ["13"]),
     ("Easy", "Quickfire: What is 9 × 6?", "54", ["54"]),
     ("Medium", "Quickfire: What is 144 ÷ 12?", "12", ["12"]),
     ("Medium", "Quickfire: What is 25% of 80?", "20", ["20"]),
 ]
-for _mode in ["Buzzer Battle", "Panic", "CHAOS MODE"]:
-    for _d, _q, _a, _aliases in EXTRA_VARIANTS:
-        QUESTIONS[_mode].append(Q(_q, _a, _d, _aliases, "Fast calculation.", "Basic arithmetic."))
+for mode in ["Buzzer Battle", "Panic", "CHAOS MODE"]:
+    for d, q, a, aliases in EXTRA_VARIANTS:
+        QUESTIONS[mode].append(Q(q, a, d, aliases, "Fast calculation.", "Basic arithmetic."))
 
 # ============================================================
 # GUESSARENA V3 — CONTINUOUS ARENA ENGINE
 # ============================================================
 import re
 import ast
+import difflib
 
 active = {}
 countdown_tasks = {}
@@ -634,7 +770,7 @@ for _mode, _items in QUESTIONS.items():
     while len(_items) < 50:
         _src = _base[(_n - 1) % len(_base)]
         _copy = dict(_src)
-        _copy["q"] = f"{_src['q']}  ⚡ BONUS {_n}"
+        _copy["q"] = f"{_src['q']}  🎲 Remix #{_n}"
         _items.append(_copy)
         _n += 1
 
@@ -691,10 +827,12 @@ for _i in range(30):
 
 MAIN_TEXT = """🏟️ <b>GUESSARENA</b>
 
-Your brain gets XP. Your confidence gets audited. 😂
+Your brain gets XP. Your dignity gets tested. 😂
 
-🎮 Pick a mode → choose difficulty → <b>the game keeps rolling.</b>
-No “start again” after every question.
+Not an exam. Not a coaching class. Bas chaos, clues aur thodi si beizzati.
+
+🎮 Pick a mode → choose difficulty → <b>phir bas khelte jao.</b>
+Har answer ke baad reset nahi — <b>next round seedha.</b>
 
 👥 <b>GROUP:</b> first correct answer wins the round.
 😈 Wrong answers roast you, but the round stays alive.
@@ -733,8 +871,8 @@ def pool_for(mode, difficulty):
     if difficulty == "Any":
         return pool
     exact = [q for q in pool if q.get("difficulty") == difficulty]
-    # Difficulty is locked: never silently mix Easy/Medium/Hard/etc.
-    return exact
+    # Never let a narrow difficulty bank become a tiny 2–3 question loop.
+    return exact if len(exact) >= 5 else pool
 
 
 def choose_question(mode, difficulty, used):
@@ -842,70 +980,21 @@ def is_correct(q, text):
             return True
         return target_expr_valid(text, q.get("numbers", []), q["target"])
     expected = [q.get("a", "")] + q.get("aliases", [])
-    return any(normalize(text) == normalize(str(x)) for x in expected)
+    incoming = normalize(text)
+    if not incoming:
+        return False
+    normalized_expected = [normalize(str(x)) for x in expected if normalize(str(x))]
+    # First: exact/alias match. Second: gentle typo tolerance for longer answers.
+    # We deliberately do NOT fuzzy-match very short answers because that creates
+    # dangerous false positives (e.g. yes/no, one-letter answers).
+    if incoming in normalized_expected:
+        return True
+    if len(incoming) >= 5:
+        for candidate in normalized_expected:
+            if len(candidate) >= 5 and difflib.SequenceMatcher(None, incoming, candidate).ratio() >= 0.90:
+                return True
+    return False
 
-
-# ============================================================
-# UI + SCORING HELPERS
-# ============================================================
-
-def timer_for(q):
-    d = q.get("difficulty", "Medium")
-    return TIMERS.get(d, 15)
-
-
-def xp_for(q):
-    if q.get("xp_override") is not None:
-        return int(q["xp_override"])
-    d = q.get("difficulty", "Medium")
-    return XP_VALUES.get(d, 20)
-
-
-def main_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎮 PLAY", callback_data="menu:play"),
-         InlineKeyboardButton("👤 PROFILE", callback_data="menu:profile")],
-        [InlineKeyboardButton("🏆 LEADERBOARD", callback_data="menu:leaderboard"),
-         InlineKeyboardButton("🏅 ACHIEVEMENTS", callback_data="menu:achievements")],
-        [InlineKeyboardButton("📅 DAILY", callback_data="menu:daily"),
-         InlineKeyboardButton("❓ HOW TO PLAY", callback_data="menu:help")],
-    ])
-
-
-def mode_menu():
-    modes = list(MODE_EMOJI.keys())
-    rows = []
-    for i in range(0, len(modes), 2):
-        row = []
-        for mode in modes[i:i+2]:
-            row.append(InlineKeyboardButton(
-                f"{MODE_EMOJI[mode]} {mode}", callback_data=f"mode:{mode}"
-            ))
-        rows.append(row)
-    rows.append([InlineKeyboardButton("🏠 HOME", callback_data="menu:home")])
-    return InlineKeyboardMarkup(rows)
-
-
-def difficulty_menu(mode):
-    rows = []
-    for i in range(0, len(DIFFICULTIES), 2):
-        row = []
-        for difficulty in DIFFICULTIES[i:i+2]:
-            row.append(InlineKeyboardButton(
-                f"{difficulty} • +{XP_VALUES[difficulty]} XP",
-                callback_data=f"diff:{mode}:{difficulty}"
-            ))
-        rows.append(row)
-    rows.append([InlineKeyboardButton("🎲 ANY DIFFICULTY", callback_data=f"diff:{mode}:Any")])
-    rows.append([InlineKeyboardButton("⬅️ MODES", callback_data="menu:play")])
-    return InlineKeyboardMarkup(rows)
-
-
-def round_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💡 HINT", callback_data="round:hint"),
-         InlineKeyboardButton("🛑 END GAME", callback_data="round:end")]
-    ])
 
 async def countdown(bot, chat_id, round_id, seconds):
     task = asyncio.current_task()
@@ -970,7 +1059,8 @@ async def send_next_round(bot, chat_id, state):
         f"<b>ROUND {state['round_no']}</b> • +{xp} XP • ⏱️ {seconds}s\n"
         f"🔥 Streak: <b>{streak}</b>\n\n"
         f"❓ <b>{html.escape(q['q'])}</b>\n\n"
-        f"👥 <i>First correct wins. Wrong answers do NOT end the round.</i>"
+        f"👥 <i>First correct wins. Wrong answers do NOT end the round.</i>\n"
+        f"🧑‍🤝‍🧑 <i>Same meaning / sensible wording? Game tries to accept it.</i>"
     )
     await bot.send_message(chat_id, text, reply_markup=round_keyboard(), parse_mode="HTML")
     cancel_countdown(chat_id)
@@ -1062,7 +1152,6 @@ async def answer(update, context):
     before = get_player(chat_id, user.id)
     old_level = level_from_xp(before["xp"])
     add_result(chat_id, user.id, name, xp=xp, win=True)
-    first_win = set_achievement(chat_id, user.id, "first_win")
     after = get_player(chat_id, user.id)
     new_level = level_from_xp(after["xp"])
     streak = after["streak"]
@@ -1080,14 +1169,8 @@ async def answer(update, context):
             f"{html.escape(title_from_level(new_level))}"
         )
         set_achievement(chat_id, user.id, "level_up")
-    if first_win:
-        lines.append("🏅 Achievement unlocked: <b>FIRST BLOOD</b>")
     if streak >= 5 and set_achievement(chat_id, user.id, "hot_streak"):
         lines.append("🏅 Achievement unlocked: <b>HOT STREAK</b>")
-    if q.get("difficulty") in ("Panic", "Extreme") and set_achievement(chat_id, user.id, "speed_demon"):
-        lines.append("🏅 Achievement unlocked: <b>SPEED DEMON</b>")
-    if state.get("mode") == "CHAOS MODE" and set_achievement(chat_id, user.id, "chaos"):
-        lines.append("🏅 Achievement unlocked: <b>CHAOS SURVIVOR</b>")
     if q.get("explain"):
         lines.append(f"💡 {html.escape(q['explain'])}")
     lines.append("⚡ <b>Next round incoming…</b>")
@@ -1150,16 +1233,6 @@ async def achievements(update, context):
     await update.effective_message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
 
 
-async def stop_cmd(update, context):
-    chat_id = update.effective_chat.id
-    if chat_id not in active:
-        await update.effective_message.reply_text("🛑 No active game. The arena is already sleeping. 😂", reply_markup=main_menu(), parse_mode="HTML")
-        return
-    cancel_countdown(chat_id)
-    active.pop(chat_id, None)
-    await update.effective_message.reply_text("🛑 <b>GAME ENDED.</b> Your brain has been released. 😂", reply_markup=main_menu(), parse_mode="HTML")
-
-
 async def help_cmd(update, context):
     await update.effective_message.reply_text(
         "❓ <b>HOW TO PLAY</b>\n\n"
@@ -1169,8 +1242,7 @@ async def help_cmd(update, context):
         "6️⃣ Timeout = answer reveal + next round.\n\n"
         "⏱️ Easy/Medium 15s • Hard/Extreme 20s • Panic 8s\n"
         "♾️ Endless until END GAME.\n"
-        "🎯 Target Number accepts a valid expression using every displayed number exactly once.\n"
-        "🛑 /stop or END GAME ends the current run.",
+        "🎯 Target Number accepts a valid expression using every displayed number exactly once.",
         reply_markup=main_menu(), parse_mode="HTML"
     )
 
@@ -1185,7 +1257,6 @@ async def daily(update, context):
     pool = QUESTIONS["CHAOS MODE"] + QUESTIONS["Logic"] + QUESTIONS["Trick"]
     seed = int(hashlib.sha256(f"{chat_id}:{date.today().isoformat()}".encode()).hexdigest()[:12], 16)
     q = prepare_question(pool[seed % len(pool)], "DAILY")
-    q["xp_override"] = 50
     active[chat_id] = {
         "mode": "DAILY", "difficulty": q.get("difficulty", "Medium"),
         "used": {question_key(q)},
@@ -1277,7 +1348,6 @@ async def button(update, context):
 async def error_handler(update, context):
     print("Unhandled error:", repr(context.error))
 
-
 async def telegram_startup(app_bot):
     """Render-safe Telegram startup: clear any old webhook and verify the token."""
     print("[GuessArena] Telegram startup: checking bot connection...", flush=True)
@@ -1290,24 +1360,11 @@ async def telegram_startup(app_bot):
         raise
 
 
-
-
-def validate_game_setup():
-    missing = []
-    for _mode in MODE_EMOJI:
-        if not QUESTIONS.get(_mode):
-            missing.append(_mode)
-    if missing:
-        raise RuntimeError("Missing question banks: " + ", ".join(missing))
-    print(f"[GuessArena] Question bank ready: {sum(len(v) for v in QUESTIONS.values())} questions across {len(QUESTIONS)} modes.", flush=True)
-
 def main():
     init_db()
-    validate_game_setup()
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is missing.")
     print("[GuessArena] BOT_TOKEN found. Building Telegram application...", flush=True)
-    print("[GuessArena] Python Telegram bot process is starting; Flask health server is separate.", flush=True)
     request = HTTPXRequest(connect_timeout=20, read_timeout=30, write_timeout=30, pool_timeout=30)
     app_bot = (
         Application.builder()
@@ -1324,19 +1381,13 @@ def main():
     app_bot.add_handler(CommandHandler("leaderboard", leaderboard))
     app_bot.add_handler(CommandHandler("achievements", achievements))
     app_bot.add_handler(CommandHandler("daily", daily))
-    app_bot.add_handler(CommandHandler("stop", stop_cmd))
-    app_bot.add_handler(CommandHandler("cancel", stop_cmd))
     app_bot.add_handler(CallbackQueryHandler(button))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, answer))
     app_bot.add_error_handler(error_handler)
     print("[GuessArena] All handlers loaded.", flush=True)
     print("GuessArena V3 is LIVE — continuous arena enabled", flush=True)
-    print("[GuessArena] Starting polling NOW...", flush=True)
-    try:
-        app_bot.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-    except Exception as exc:
-        print(f"[GuessArena] POLLING STOPPED: {exc!r}", flush=True)
-        raise
+    print("[GuessArena] Starting polling...", flush=True)
+    app_bot.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
