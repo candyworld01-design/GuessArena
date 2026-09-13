@@ -1,10 +1,11 @@
-import os
+ import os
 import random
 import sqlite3
 import html
 import asyncio
 import uuid
 from threading import Thread
+import traceback
 from datetime import date
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -25,18 +26,17 @@ def health_check():
     return "Bot is Alive!", 200
 
 def run_web_server():
+    # Use Werkzeug directly instead of Flask's development server.
+    # This removes Render's "development server" warning and keeps the
+    # health endpoint alive without taking over the Telegram bot process.
+    from werkzeug.serving import make_server
     port = int(os.environ.get("PORT", 8080))
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        debug=False,
-        use_reloader=False,
-    )
+    print(f"[GuessArena] Health server starting on 0.0.0.0:{port}", flush=True)
+    httpd = make_server("0.0.0.0", port, app, threaded=True)
+    print(f"[GuessArena] Health server ready on port {port}", flush=True)
+    httpd.serve_forever()
 
-server_thread = Thread(target=run_web_server, daemon=True)
-server_thread.start()
-
-TOKEN = os.environ.get("BOT_TOKEN")
+TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DB_FILE = "guessarena.db"
 
 TIMERS = {
@@ -1348,6 +1348,7 @@ async def button(update, context):
 async def error_handler(update, context):
     print("Unhandled error:", repr(context.error))
 
+
 async def telegram_startup(app_bot):
     """Render-safe Telegram startup: clear any old webhook and verify the token."""
     print("[GuessArena] Telegram startup: checking bot connection...", flush=True)
@@ -1361,33 +1362,67 @@ async def telegram_startup(app_bot):
 
 
 def main():
-    init_db()
-    if not TOKEN:
-        raise RuntimeError("BOT_TOKEN environment variable is missing.")
-    print("[GuessArena] BOT_TOKEN found. Building Telegram application...", flush=True)
-    request = HTTPXRequest(connect_timeout=20, read_timeout=30, write_timeout=30, pool_timeout=30)
-    app_bot = (
-        Application.builder()
-        .token(TOKEN)
-        .request(request)
-        .post_init(telegram_startup)
-        .build()
-    )
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("help", help_cmd))
-    app_bot.add_handler(CommandHandler("play", play))
-    app_bot.add_handler(CommandHandler("game", game_command))
-    app_bot.add_handler(CommandHandler("profile", profile))
-    app_bot.add_handler(CommandHandler("leaderboard", leaderboard))
-    app_bot.add_handler(CommandHandler("achievements", achievements))
-    app_bot.add_handler(CommandHandler("daily", daily))
-    app_bot.add_handler(CallbackQueryHandler(button))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, answer))
-    app_bot.add_error_handler(error_handler)
-    print("[GuessArena] All handlers loaded.", flush=True)
-    print("GuessArena V3 is LIVE — continuous arena enabled", flush=True)
-    print("[GuessArena] Starting polling...", flush=True)
-    app_bot.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    print("[GuessArena] Booting...", flush=True)
+    try:
+        init_db()
+        print("[GuessArena] Database ready.", flush=True)
+
+        if not TOKEN:
+            raise RuntimeError("BOT_TOKEN environment variable is missing. Add BOT_TOKEN in Render Environment Variables.")
+
+        if ":" not in TOKEN:
+            raise RuntimeError("BOT_TOKEN looks invalid: Telegram bot tokens normally contain ':' .")
+
+        print("[GuessArena] BOT_TOKEN found. Building Telegram application...", flush=True)
+        request = HTTPXRequest(
+            connect_timeout=20,
+            read_timeout=30,
+            write_timeout=30,
+            pool_timeout=30,
+        )
+        async def startup_check(application):
+            print("[GuessArena] Telegram startup: clearing old webhook...", flush=True)
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            print("[GuessArena] Telegram startup: verifying bot token...", flush=True)
+            me = await application.bot.get_me()
+            print(f"[GuessArena] Telegram connected as @{me.username or me.first_name} (id={me.id})", flush=True)
+
+        app_bot = (
+            Application.builder()
+            .token(TOKEN)
+            .request(request)
+            .post_init(startup_check)
+            .build()
+        )
+
+        app_bot.add_handler(CommandHandler("start", start))
+        app_bot.add_handler(CommandHandler("help", help_cmd))
+        app_bot.add_handler(CommandHandler("play", play))
+        app_bot.add_handler(CommandHandler("game", game_command))
+        app_bot.add_handler(CommandHandler("profile", profile))
+        app_bot.add_handler(CommandHandler("leaderboard", leaderboard))
+        app_bot.add_handler(CommandHandler("achievements", achievements))
+        app_bot.add_handler(CommandHandler("daily", daily))
+        app_bot.add_handler(CallbackQueryHandler(button))
+        app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, answer))
+        app_bot.add_error_handler(error_handler)
+        print("[GuessArena] All handlers loaded.", flush=True)
+
+        # Health server is started only after the Telegram application has
+        # been built, so a Telegram startup failure cannot look like a
+        # healthy bot that silently died.
+        Thread(target=run_web_server, daemon=True, name="guessarena-health").start()
+
+        print("[GuessArena] Starting polling NOW...", flush=True)
+        app_bot.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+        )
+
+    except Exception as exc:
+        print("[GuessArena] FATAL STARTUP ERROR:", repr(exc), flush=True)
+        traceback.print_exc()
+        raise
 
 
 if __name__ == "__main__":
