@@ -700,7 +700,118 @@ No “start again” after every question.
 ⏰ Timeout reveals the answer.
 ♾️ <b>ENDLESS:</b> keep playing until you press END GAME.
 """
+# ============================================================
+# GUESSARENA UI / GAME HELPERS
+# ============================================================
 
+def mode_menu():
+    modes = list(QUESTIONS.keys())
+
+    rows = []
+    row = []
+
+    for mode in modes:
+        button = InlineKeyboardButton(
+            f"{MODE_EMOJI.get(mode, '🎮')} {mode}",
+            callback_data=f"mode:{mode}"
+        )
+        row.append(button)
+
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+
+    if row:
+        rows.append(row)
+
+    rows.append([
+        InlineKeyboardButton("📅 DAILY", callback_data="menu:daily"),
+        InlineKeyboardButton("👤 PROFILE", callback_data="menu:profile"),
+    ])
+
+    rows.append([
+        InlineKeyboardButton("🏆 LEADERBOARD", callback_data="menu:leaderboard"),
+        InlineKeyboardButton("🏅 ACHIEVEMENTS", callback_data="menu:achievements"),
+    ])
+
+    rows.append([
+        InlineKeyboardButton("❓ HOW TO PLAY", callback_data="menu:help")
+    ])
+
+    return InlineKeyboardMarkup(rows)
+
+
+def difficulty_menu(mode):
+    rows = []
+
+    for difficulty in DIFFICULTIES:
+        rows.append([
+            InlineKeyboardButton(
+                f"{difficulty} • +{XP_VALUES[difficulty]} XP",
+                callback_data=f"diff:{mode}:{difficulty}"
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton(
+            "🎲 ANY DIFFICULTY",
+            callback_data=f"diff:{mode}:Any"
+        )
+    ])
+
+    rows.append([
+        InlineKeyboardButton("⬅️ BACK", callback_data="menu:play")
+    ])
+
+    return InlineKeyboardMarkup(rows)
+
+
+def main_menu():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎮 PLAY", callback_data="menu:play"),
+            InlineKeyboardButton("📅 DAILY", callback_data="menu:daily"),
+        ],
+        [
+            InlineKeyboardButton("👤 PROFILE", callback_data="menu:profile"),
+            InlineKeyboardButton("🏆 LEADERBOARD", callback_data="menu:leaderboard"),
+        ],
+        [
+            InlineKeyboardButton("🏅 ACHIEVEMENTS", callback_data="menu:achievements"),
+            InlineKeyboardButton("❓ HELP", callback_data="menu:help"),
+        ],
+    ])
+
+
+def round_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💡 HINT", callback_data="round:hint"),
+            InlineKeyboardButton("🛑 END GAME", callback_data="round:end"),
+        ]
+    ])
+
+
+def timer_for(q):
+    difficulty = q.get("difficulty", "Medium")
+
+    if difficulty == "Easy":
+        return 15
+    elif difficulty == "Medium":
+        return 15
+    elif difficulty == "Hard":
+        return 20
+    elif difficulty == "Extreme":
+        return 20
+    elif difficulty == "Panic":
+        return 8
+
+    return 15
+
+
+def xp_for(q):
+    difficulty = q.get("difficulty", "Medium")
+    return XP_VALUES.get(difficulty, 20)
 
 def cancel_countdown(chat_id):
     task = countdown_tasks.pop(chat_id, None)
